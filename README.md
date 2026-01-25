@@ -1,6 +1,6 @@
 # hap
 
-**Hive Agent Pilot.** A blunt, efficient project manager for the modern parallel engineer.
+**Hive Agent Pilot.** A blunt, efficient project manager for the modern ~~10x~~ Multi-threaded Engineer.
 
 `hap` is a CLI tool designed for developers who use **Zellij**, **Git Worktrees**, and **AI Agents**. It enforces a "Hive" directory structure to manage complex, multi-repository projects without context switching.
 
