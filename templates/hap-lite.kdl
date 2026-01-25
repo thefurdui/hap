@@ -1,0 +1,44 @@
+layout {
+    // Standard status bar. Helpful for knowing which session/mode you are in
+    // You can remove it for full minimalist mode
+    default_tab_template {
+        children
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    // Tab 1: The Cockpit
+    // The Main working space. Nvim + Your CLI agent of choice
+    // Identical to hap.kdl
+    tab name="code" focus=true {
+        pane split_direction="vertical" {
+            // The Main Stage
+            pane size="70%" name="neovim" command="nvim" focus=true
+            // The Agent Slot
+            // I use 'gemini' (Google's CLI)
+            // If you use 'claude', 'aider', or 'gh copilot', swap the command below
+            //
+            // We wrap it in zsh so if the agent crashes (or you CTRL+C it),
+            // the pane stays open instead of vanishing
+            pane name="agent" command="zsh" {
+                args "-c" "export NODE_NO_WARNINGS=1; gemini; exec zsh"
+            }
+        }
+    }
+    // Tab 2: The Engine Room
+    // Git, file ops, and stray shell commands go here
+    // Helps to keep Tab 1 clean
+    //
+    // This is the difference from hap
+    // We don't run any servers here
+    // Only the main workspace should run active servers
+    tab name="shell" {
+        pane split_direction="vertical" {
+            pane stacked=true {
+                pane name="git" command="lazygit"
+                pane name="term" command="zsh" focus=true
+            }
+        }
+    }
+}
+

@@ -1,0 +1,78 @@
+layout {
+    // Standard status bar. Helpful for knowing which session/mode you are in
+    // You can remove it for full minimalist mode
+    default_tab_template {
+        children
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    // Tab 1: The Cockpit
+    // The Main working space. Nvim + Your CLI agent of choice
+    tab name="code" focus=true {
+        pane split_direction="vertical" {
+            // The Main Stage
+            pane size="70%" name="neovim" command="nvim" focus=true
+            // The Agent Slot
+            // I use 'gemini' (Google's CLI)
+            // If you use 'claude', 'aider', or 'gh copilot', swap the command below
+            //
+            // We wrap it in zsh so if the agent crashes (or you CTRL+C it),
+            // the pane stays open instead of vanishing
+            pane name="agent" command="zsh" {
+                args "-c" "export NODE_NO_WARNINGS=1; gemini; exec zsh"
+            }
+        }
+    }
+    // Tab 2: The Engine Room
+    // Git, file ops, and stray shell commands go here
+    // Helps to keep Tab 1 clean
+    // The Engine Room starts up the servers when you open the main workspace
+    // For demonstration purposes, we treat Backend and Frontend as separate repositories running in parallel
+    tab name="systems" {
+        pane split_direction="vertical" {
+            // Left Column: Backend Service
+            // Change cwd "./backend" to your actual server folder
+            pane stacked=true {
+                // 1. The Server Runner
+                // We use command="zsh" so you can Ctrl+C the running process
+                // without the pane closing immediately.
+                // Replace the echo command with 'go run .', 'cargo run', etc.
+                pane name="server" command="zsh" {
+                    args "-c" "echo 'Starting Backend...'; exec zsh"
+                    cwd "./backend"
+                }
+                // 2. Git Control
+                // lazygit is not a requirement, but it is the recommended way
+                // to handle git in a CLI-centric workflow.
+                pane name="git" command="lazygit" {
+                    cwd "./backend"
+                }
+                // 3. Manual Shell
+                // For running migrations, ad-hoc commands, or tests.
+                pane name="shell" command="zsh" focus=true {
+                    cwd "./backend"
+                }
+            }
+            // Right Column: Frontend Service
+            // Change cwd "./frontend" to your actual app folder
+            pane stacked=true {
+                // 1. The Server Runner
+                // Replace echo with 'pnpm dev', 'npm start', etc.
+                pane name="server" command="zsh" {
+                    args "-c" "echo 'Starting Frontend...'; exec zsh"
+                    cwd "./frontend"
+                }
+                // 2. Git Control
+                pane name="git" command="lazygit" {
+                    cwd "./frontend"
+                }
+                // 3. Manual Shell
+                pane name="shell" command="zsh" focus=true {
+                    cwd "./frontend"
+                }
+            }
+        }
+    }
+}
+

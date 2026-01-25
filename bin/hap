@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# hap - Hive Agent Pilot
+# https://github.com/thefurdui/hap
+# License: MIT
+
+set -e
+
+# Config
+APP_NAME="hap"
+VERSION="0.1.0"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
+DB_FILE="$DATA_DIR/projects.csv"
+
+# Colors
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+log_info() { echo -e "${BLUE}INFO:${NC} $1"; }
+log_succ() { echo -e "${GREEN}OK:${NC}   $1"; }
+log_warn() { echo -e "${YELLOW}WARN:${NC} $1"; }
+log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
+
+ensure_setup() {
+  mkdir -p "$DATA_DIR"
+  if [[ ! -f "$DB_FILE" ]]; then
+    touch "$DB_FILE"
+  fi
+}
+
+# Launches Zellij.
+# Handles mode switching (lite vs full) by checking available KDL files.
+# exec is used to replace the shell process.
+launch_session() {
+  local project_name="$1"
+  local workspace_path="$2"
+  local session_name="$3"
+  local mode="$4"
+
+  [[ ! -d "$workspace_path" ]] && {
+    log_err "Path not found: $workspace_path"
+    exit 1
+  }
+
+  cd "$workspace_path" || exit 1
+  log_info "Launching $project_name ($mode)..."
+
+  local layout_file=""
+
+  # Priority: requested mode -> fallback mode -> default
+  if [[ "$mode" == "lite" ]]; then
+    if [[ -f "./hap-lite.kdl" ]]; then
+      layout_file="./hap-lite.kdl"
+    elif [[ -f "./hap.kdl" ]]; then
+      log_warn "hap-lite.kdl missing, falling back to full layout"
+      layout_file="./hap.kdl"
+    fi
+  else
+    # Default/Full mode
+    if [[ -f "./hap.kdl" ]]; then
+      layout_file="./hap.kdl"
+    elif [[ -f "./hap-lite.kdl" ]]; then
+      log_warn "hap.kdl missing, using lite layout"
+      layout_file="./hap-lite.kdl"
+    fi
+  fi
+
+  if zellij list-sessions 2>/dev/null | grep -q "$session_name"; then
+    zellij attach "$session_name"
+  else
+    if [[ -n "$layout_file" ]]; then
+      zellij --session "$session_name" --new-session-with-layout "$layout_file"
+    else
+      log_warn "No KDL found. Shell only."
+      zellij attach -c "$session_name"
+    fi
+  fi
+}
+
+# The core Agent logic.
+# 1. Checks if workspace exists.
+# 2. Creates git worktrees from 'sources/' into 'workspaces/'.
+# 3. Background installs dependencies (pnpm/go).
+# 4. Launches Zellij in the new ephemeral workspace.
+# 5. Cleans up (deletes folder/prunes worktree) ONLY if git status is clean.
+create_agent_workspace() {
+  local project_root="$1"
+  local project_name="$2"
+  local agent_task="$3"
+  local base_branch="$4"
+
+  local sources_dir="$project_root/sources"
+  local target_ws="$project_root/workspaces/$agent_task"
+  local config_dir="$project_root/config"
+
+  if [[ -d "$target_ws" ]]; then
+    log_warn "Resuming existing workspace: $agent_task"
+    launch_session "$project_name" "$target_ws" "hap-$agent_task" "lite"
+    return
+  fi
+
+  log_info "Spawning Agent: $agent_task (Base: $base_branch)"
+  mkdir -p "$target_ws"
+
+  # Create worktrees
+  for repo in "$sources_dir"/*; do
+    if [[ -d "$repo" && -d "$repo/.git" ]]; then
+      local repo_name=$(basename "$repo")
+      local branch_name="agent/$agent_task/$repo_name"
+
+      # Try creating worktree. If branch exists, fall back to checking it out.
+      if ! git -C "$repo" worktree add "$target_ws/$repo_name" -b "$branch_name" "$base_branch" 2>/dev/null; then
+        git -C "$repo" worktree add "$target_ws/$repo_name" "$branch_name"
+      fi
+
+      # Smart Install (Background)
+      if [[ -f "$target_ws/$repo_name/pnpm-lock.yaml" ]]; then
+        (cd "$target_ws/$repo_name" && pnpm install --frozen-lockfile --silent &)
+      elif [[ -f "$target_ws/$repo_name/go.mod" ]]; then
+        (cd "$target_ws/$repo_name" && go mod download &)
+      fi
+    fi
+  done
+  wait
+
+  # Copy configs
+  [[ -f "$config_dir/hap.kdl" ]] && cp "$config_dir/hap.kdl" "$target_ws/"
+  [[ -f "$config_dir/hap-lite.kdl" ]] && cp "$config_dir/hap-lite.kdl" "$target_ws/"
+
+  log_succ "Workspace ready"
+
+  # Subshell to keep environment clean before cleanup
+  (
+    cd "$target_ws" || exit 1
+    zellij --layout ./hap-lite.kdl --session "hap-$agent_task"
+  )
+
+  cleanup_workspace "$target_ws" "$sources_dir"
+}
+
+cleanup_workspace() {
+  local ws_path="$1"
+  local sources_dir="$2"
+  local dirty=0
+
+  # Check for uncommitted changes
+  for repo in "$ws_path"/*; do
+    [[ -d "$repo/.git" && -n $(git -C "$repo" status --porcelain) ]] && dirty=1
+  done
+
+  if [[ $dirty -eq 0 ]]; then
+    log_info "Workspace clean. Pruning..."
+    for repo in "$ws_path"/*; do
+      if [[ -d "$repo/.git" ]]; then
+        local repo_name=$(basename "$repo")
+        rm -rf "$repo"
+        git -C "$sources_dir/$repo_name" worktree prune
+      fi
+    done
+    rm -rf "$ws_path"
+    log_succ "Destroyed"
+  else
+    log_warn "Uncommitted changes detected. Workspace preserved."
+    log_warn "Location: $ws_path"
+  fi
+}
+
+usage() {
+  echo "Usage: $APP_NAME [options]"
+  echo "  -s <name> [path]    Save project"
+  echo "  -w <name> <task>    Start AGENT workspace (Lite mode)"
+  echo "  -m <lite|full>      Force mode"
+  echo "  -b <branch>         Base branch for agent (default: dev)"
+  echo "  -d <name>           Delete project"
+  echo "  -l                  List projects"
+  echo "  -v                  Show version"
+  echo "  (no args)           Open interactive selection"
+}
+
+ensure_setup
+
+PROJECT_ARG=""
+TASK_ARG=""
+BRANCH_ARG="dev"
+MODE_ARG="default"
+ACTION="interactive"
+
+while getopts "s:d:p:w:b:m:lhv" opt; do
+  case $opt in
+  v)
+    echo "$APP_NAME v$VERSION"
+    exit 0
+    ;;
+  s)
+    ACTION="save"
+    PROJECT_ARG="$OPTARG"
+    eval "NEXT_OPT=\${$OPTIND}"
+    if [[ -n "$NEXT_OPT" && "$NEXT_OPT" != -* ]]; then
+      PROJECT_PATH="$NEXT_OPT"
+      OPTIND=$((OPTIND + 1))
+    else
+      PROJECT_PATH="."
+    fi
+    ;;
+  d)
+    ACTION="delete"
+    PROJECT_ARG="$OPTARG"
+    ;;
+  p)
+    ACTION="open"
+    PROJECT_ARG="$OPTARG"
+    ;;
+  b) BRANCH_ARG="$OPTARG" ;;
+  m) MODE_ARG="$OPTARG" ;;
+  w)
+    ACTION="worktree"
+    PROJECT_ARG="$OPTARG"
+    eval "TASK_ARG=\${$OPTIND}"
+    [[ -z "$TASK_ARG" || "$TASK_ARG" == -* ]] && {
+      log_err "Missing task name"
+      exit 1
+    }
+    OPTIND=$((OPTIND + 1))
+    ;;
+  l)
+    column -t -s "|" "$DB_FILE"
+    exit 0
+    ;;
+  h)
+    usage
+    exit 0
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+  esac
+done
+
+case $ACTION in
+save)
+  [[ "$PROJECT_PATH" == "." ]] && FULL_PATH="$(pwd)" || FULL_PATH="$(cd "$PROJECT_PATH" && pwd)"
+  echo "$PROJECT_ARG|$FULL_PATH" >>"$DB_FILE"
+  log_succ "Saved $PROJECT_ARG"
+  ;;
+open)
+  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2)
+  launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$MODE_ARG"
+  ;;
+worktree)
+  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2)
+  create_agent_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG"
+  ;;
+interactive)
+  SELECTION=$(column -t -s "|" "$DB_FILE" | fzf --height=40% --layout=reverse --border --prompt="Select Hive > ")
+  if [[ -n "$SELECTION" ]]; then
+    NAME=$(echo "$SELECTION" | awk '{print $1}')
+    PATH_TO_ROOT=$(grep "^$NAME|" "$DB_FILE" | cut -d '|' -f 2)
+    launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$MODE_ARG"
+  fi
+  ;;
+esac
