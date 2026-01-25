@@ -5,14 +5,14 @@
 
 set -e
 
-# Config
+# --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.1.0"
+VERSION="0.1.1"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
 
-# Colors
+# --- COLORS ---
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -26,14 +26,18 @@ log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
 
 ensure_setup() {
   mkdir -p "$DATA_DIR"
-  if [[ ! -f "$DB_FILE" ]]; then
-    touch "$DB_FILE"
-  fi
+  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE"
+
+  for cmd in zellij fzf git; do
+    if ! command -v $cmd &>/dev/null; then
+      log_err "Missing dependency: $cmd"
+      exit 1
+    fi
+  done
 }
 
-# Launches Zellij.
-# Handles mode switching (lite vs full) by checking available KDL files.
-# exec is used to replace the shell process.
+# Launch Zellij session
+# Kill stale sessions before starting
 launch_session() {
   local project_name="$1"
   local workspace_path="$2"
@@ -46,6 +50,12 @@ launch_session() {
   }
 
   cd "$workspace_path" || exit 1
+
+  # Prune. Silence error if session doesn't exist.
+  if command -v zellij &>/dev/null; then
+    zellij delete-session "$session_name" 2>/dev/null || true
+  fi
+
   log_info "Launching $project_name ($mode)..."
 
   local layout_file=""
@@ -68,16 +78,19 @@ launch_session() {
     fi
   fi
 
-  if zellij list-sessions 2>/dev/null | grep -q "$session_name"; then
-    zellij attach "$session_name"
-  else
-    if [[ -n "$layout_file" ]]; then
-      zellij --session "$session_name" --new-session-with-layout "$layout_file"
-    else
-      log_warn "No KDL found. Shell only."
-      zellij attach -c "$session_name"
-    fi
-  fi
+  # Convert to absolute path to ensure Zellij daemon can find it
+  [[ -n "$layout_file" ]] && layout_file="$(pwd -P)/${layout_file#./}"
+
+  # Build args
+  local args=()
+  [[ -n "$layout_file" ]] && args+=("--new-session-with-layout" "$layout_file")
+  args+=("--session" "$session_name")
+
+  # Detach from current session if any, to avoid potential errors
+  unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
+
+  log_info "Command: zellij ${args[*]}"
+  env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID command zellij "${args[@]}"
 }
 
 # The core Agent logic.
@@ -129,7 +142,7 @@ create_agent_workspace() {
   # Calculate relative path to config dir
   local slashes="${agent_task//[^\/]/}"
   local rel_path="../../config"
-  for ((i=0; i<${#slashes}; i++)); do
+  for ((i = 0; i < ${#slashes}; i++)); do
     rel_path="../$rel_path"
   done
 
@@ -142,7 +155,7 @@ create_agent_workspace() {
   # Subshell to keep environment clean before cleanup
   (
     cd "$target_ws" || exit 1
-    zellij --layout ./hap-lite.kdl --session "hap-$agent_task"
+    launch_session "$project_name" "$target_ws" "hap-$agent_task" "lite"
   )
 
   cleanup_workspace "$target_ws" "$sources_dir"
@@ -155,7 +168,11 @@ cleanup_workspace() {
 
   # Check for uncommitted changes
   for repo in "$ws_path"/*; do
-    [[ -d "$repo/.git" && -n $(git -C "$repo" status --porcelain) ]] && dirty=1
+    if [[ -d "$repo/.git" ]]; then
+      if [[ -n $(git -C "$repo" status --porcelain) ]]; then
+        dirty=1
+      fi
+    fi
   done
 
   if [[ $dirty -eq 0 ]]; then
@@ -197,10 +214,6 @@ ACTION="interactive"
 
 while getopts "s:d:p:w:b:m:lhv" opt; do
   case $opt in
-  v)
-    echo "$APP_NAME v$VERSION"
-    exit 0
-    ;;
   s)
     ACTION="save"
     PROJECT_ARG="$OPTARG"
@@ -222,6 +235,10 @@ while getopts "s:d:p:w:b:m:lhv" opt; do
     ;;
   b) BRANCH_ARG="$OPTARG" ;;
   m) MODE_ARG="$OPTARG" ;;
+  v)
+    echo "hap v$VERSION"
+    exit 0
+    ;;
   w)
     ACTION="worktree"
     PROJECT_ARG="$OPTARG"
@@ -254,18 +271,30 @@ save)
   log_succ "Saved $PROJECT_ARG"
   ;;
 open)
-  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2)
+  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  if [[ -z "$PATH_TO_ROOT" ]]; then
+    log_err "Project not found: $PROJECT_ARG"
+    exit 1
+  fi
   launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$MODE_ARG"
   ;;
 worktree)
-  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2)
+  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  if [[ -z "$PATH_TO_ROOT" ]]; then
+    log_err "Project not found: $PROJECT_ARG"
+    exit 1
+  fi
   create_agent_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG"
   ;;
 interactive)
-  SELECTION=$(column -t -s "|" "$DB_FILE" | fzf --height=40% --layout=reverse --border --prompt="Select Hive > ")
+  if [[ ! -s "$DB_FILE" ]]; then
+    log_warn "No projects found. Use 'hap -s <name> <path>' to save one."
+    exit 0
+  fi
+  SELECTION=$(fzf --height=40% --layout=reverse --border --prompt="Select Hive > " --delimiter="|" --with-nth=1,2 <"$DB_FILE")
   if [[ -n "$SELECTION" ]]; then
-    NAME=$(echo "$SELECTION" | awk '{print $1}')
-    PATH_TO_ROOT=$(grep "^$NAME|" "$DB_FILE" | cut -d '|' -f 2)
+    NAME=$(echo "$SELECTION" | cut -d '|' -f 1)
+    PATH_TO_ROOT=$(echo "$SELECTION" | cut -d '|' -f 2)
     launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$MODE_ARG"
   fi
   ;;
