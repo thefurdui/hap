@@ -126,9 +126,16 @@ create_agent_workspace() {
   done
   wait
 
-  # Copy configs
-  [[ -f "$config_dir/hap.kdl" ]] && cp "$config_dir/hap.kdl" "$target_ws/"
-  [[ -f "$config_dir/hap-lite.kdl" ]] && cp "$config_dir/hap-lite.kdl" "$target_ws/"
+  # Calculate relative path to config dir
+  local slashes="${agent_task//[^\/]/}"
+  local rel_path="../../config"
+  for ((i=0; i<${#slashes}; i++)); do
+    rel_path="../$rel_path"
+  done
+
+  # Link configs (relative)
+  [[ -f "$config_dir/hap.kdl" ]] && ln -sf "$rel_path/hap.kdl" "$target_ws/hap.kdl"
+  [[ -f "$config_dir/hap-lite.kdl" ]] && ln -sf "$rel_path/hap-lite.kdl" "$target_ws/hap-lite.kdl"
 
   log_succ "Workspace ready"
 
