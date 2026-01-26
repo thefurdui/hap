@@ -184,6 +184,12 @@ cleanup_workspace() {
   local sources_dir="$2"
   local dirty=0
 
+  # Safety check: Never cleanup the root workspaces directory
+  if [[ "$ws_path" == *"/workspaces" || "$ws_path" == *"/workspaces/" ]]; then
+    log_err "Invalid workspace path for cleanup: $ws_path"
+    return
+  fi
+
   # Check for uncommitted changes
   for repo in "$ws_path"/*; do
     if [[ -d "$repo/.git" ]]; then
