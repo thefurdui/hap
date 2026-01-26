@@ -110,7 +110,7 @@ create_agent_workspace() {
 
   if [[ -d "$target_ws" ]]; then
     log_warn "Resuming existing workspace: $agent_task"
-    launch_session "$project_name" "$target_ws" "hap-$agent_task" "lite" "$project_root"
+    launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root"
     return
   fi
 
@@ -173,7 +173,7 @@ create_agent_workspace() {
   # Subshell to keep environment clean before cleanup
   (
     cd "$target_ws" || exit 1
-    launch_session "$project_name" "$target_ws" "hap-$agent_task" "lite" "$project_root"
+    launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root"
   )
 
   cleanup_workspace "$target_ws" "$sources_dir"
