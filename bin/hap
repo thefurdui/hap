@@ -7,7 +7,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.1.2"
+VERSION="0.2.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -126,6 +126,36 @@ create_agent_workspace() {
       # Try creating worktree. If branch exists, fall back to checking it out.
       if ! git -C "$repo" worktree add "$target_ws/$repo_name" -b "$branch_name" "$base_branch" 2>/dev/null; then
         git -C "$repo" worktree add "$target_ws/$repo_name" "$branch_name"
+      fi
+
+      # Shared State Linking
+      if [[ -d "$project_root/shared/$repo_name" ]]; then
+        log_info "Linking shared state for $repo_name..."
+        (
+          cd "$project_root/shared/$repo_name" || exit
+          find . -type f | while read -r file; do
+            # Remove leading ./
+            local clean_file="${file#./}"
+            local dest_file="$target_ws/$repo_name/$clean_file"
+            local dest_dir=$(dirname "$dest_file")
+
+            mkdir -p "$dest_dir"
+
+            # Calculate relative steps back to project root
+            # Base: workspaces(1) / task(2) / repo(3) -> 3 levels up
+            local ups="../../../"
+
+            # Add ups for subdirectories in the file path
+            local subdir=$(dirname "$clean_file")
+            if [[ "$subdir" != "." ]]; then
+              # Count components
+              local sub_depth=$(echo "$subdir" | awk -F/ '{print NF}')
+              for ((i = 0; i < sub_depth; i++)); do ups="../$ups"; done
+            fi
+
+            ln -sf "${ups}shared/$repo_name/$clean_file" "$dest_file"
+          done
+        )
       fi
 
       # Smart Install (Background)
