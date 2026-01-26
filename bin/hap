@@ -7,7 +7,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.2.0"
+VERSION="0.2.1"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -123,6 +123,9 @@ create_agent_workspace() {
       local repo_name=$(basename "$repo")
       local branch_name="agent/$agent_task/$repo_name"
 
+      # Prune stale worktrees to avoid "missing but already registered" error
+      git -C "$repo" worktree prune
+
       # Try creating worktree. If branch exists, fall back to checking it out.
       if ! git -C "$repo" worktree add "$target_ws/$repo_name" -b "$branch_name" "$base_branch" 2>/dev/null; then
         git -C "$repo" worktree add "$target_ws/$repo_name" "$branch_name"
@@ -192,7 +195,7 @@ cleanup_workspace() {
 
   # Check for uncommitted changes
   for repo in "$ws_path"/*; do
-    if [[ -d "$repo/.git" ]]; then
+    if [[ -e "$repo/.git" ]]; then
       if [[ -n $(git -C "$repo" status --porcelain) ]]; then
         dirty=1
       fi
@@ -202,7 +205,7 @@ cleanup_workspace() {
   if [[ $dirty -eq 0 ]]; then
     log_info "Workspace clean. Pruning..."
     for repo in "$ws_path"/*; do
-      if [[ -d "$repo/.git" ]]; then
+      if [[ -e "$repo/.git" ]]; then
         local repo_name=$(basename "$repo")
         git -C "$sources_dir/$repo_name" worktree remove "$repo" --force
       fi
