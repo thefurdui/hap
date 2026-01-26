@@ -7,7 +7,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.1.1"
+VERSION="0.1.2"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -168,8 +168,7 @@ cleanup_workspace() {
     for repo in "$ws_path"/*; do
       if [[ -d "$repo/.git" ]]; then
         local repo_name=$(basename "$repo")
-        rm -rf "$repo"
-        git -C "$sources_dir/$repo_name" worktree prune
+        git -C "$sources_dir/$repo_name" worktree remove "$repo" --force
       fi
     done
     rm -rf "$ws_path"
