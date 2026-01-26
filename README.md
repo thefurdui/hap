@@ -43,10 +43,16 @@ make install
     ~/projects/your-project/
     ├── config/             <-- You MUST put hap.kdl and hap-lite.kdl here
     ├── sources/            <-- Bare or Detached Git Repos (The "Truth")
-    └── workspaces/         <-- Managed by hap (The "Action")
+    ├── workspaces/         <-- Managed by hap (The "Action")
+    └── shared/             <-- (Optional) Persistent state linked to workspaces
     ```
 
-2.  **Configure the Layouts:**
+2.  **Shared State (Optional):**
+    If you have files that are NOT in git (like `.env` files, local certificates, or IDE configs) but need them in every ephemeral workspace:
+    - Create a folder in `shared/` named exactly like the repo in `sources/`.
+    - Any file placed in `shared/repo-name/` will be automatically symlinked into the agent's workspace when created.
+
+3.  **Configure the Layouts:**
     Copy the files from `templates/` into your `config/` folder and adapt them:
     - **`hap.kdl` (The Heavy Lifter):** Edit the "Systems" tab. Change the `cwd` paths to match your repo names in `sources/` and update the `args` to run your actual servers (e.g., `go run main.go`, `pnpm dev`).
     - **`hap-lite.kdl` (The Agent):** Update the agent pane command if you use something other than `gemini` (e.g., `claude`, `aider`).
