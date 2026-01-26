@@ -2,7 +2,7 @@
 
 **Hive Agent Pilot.** A blunt, efficient project manager for the modern ~~10x~~ Multi-threaded Engineer.
 
-`hap` is a CLI tool designed for developers who use **Zellij**, **Git Worktrees**, and **AI Agents**. It enforces a "Hive" directory structure to manage complex, multi-repository projects without context switching.
+`hap` is a CLI tool designed for developers who want to use **AI Agents** locally in parallel on different git branches. It enforces a "Hive" directory structure to manage complex, multi-repository projects without context switching.
 
 ## Why?
 
@@ -18,9 +18,10 @@ Most project managers just `cd` into a folder. `hap` manages **parallel universe
 ### Prerequisites
 
 - `bash` (4.0+)
-- `zellij`
+- `zellij` (default editor)
 - `fzf`
 - `git`
+- `cursor` or `antigravity` (optional, for `-e cursor` or `-e antigravity` support)
 - `pnpm` (optional, for auto-install)
 
 ### Build
@@ -57,7 +58,7 @@ make install
     - **`hap.kdl` (The Heavy Lifter):** Edit the "Systems" tab. Change the `cwd` paths to match your repo names in `sources/` and update the `args` to run your actual servers (e.g., `go run main.go`, `pnpm dev`).
     - **`hap-lite.kdl` (The Agent):** Update the agent pane command if you use something other than `gemini` (e.g., `claude`, `aider`).
 
-3.  **Register the Project:**
+4.  **Register the Project:**
     ```bash
     cd ~/projects/your-project
     hap -s your-project .
@@ -92,6 +93,45 @@ Open the Main workspace, but skip the heavy server startup (uses `hap-lite.kdl`)
 ```bash
 hap -m lite
 ```
+
+**Custom Editor:**
+By default, `hap` uses Zellij. You can switch to a GUI editor for a more traditional IDE experience.
+
+```bash
+hap -p your-project -e cursor
+hap -w your-project fix-bug -e cursor
+hap -p your-project -e antigravity
+hap -w your-project fix-bug -e antigravity
+```
+
+Currently supported values for `-e`: `zellij` (default), `cursor`, `antigravity`.
+
+## Architecture
+
+### Supervisor Pattern
+
+`hap` uses a "Supervisor Pattern" for managing workspace lifecycles:
+
+1. **PID Lock (GUI Editors):** When using `cursor` or `antigravity`, a `.hap.pid` file is created in the workspace containing the script's PID. The script blocks (via `--wait`) until the editor closes.
+
+2. **Process Replacement (Zellij):** When using Zellij, the script uses `exec` to replace itself with the Zellij process. No PID file is created since the shell process dies.
+
+3. **Signal Trapping:** Robust `trap` on `EXIT SIGINT SIGTERM SIGHUP` ensures cleanup runs even if:
+   - User `Cmd+Q`s the GUI editor
+   - Terminal is killed
+   - Process receives interrupt signals
+
+4. **Zombie Cleanup (Self-Healing):** On every `hap` invocation, orphaned workspaces are detected and cleaned:
+   - Workspaces with `.hap.pid`: Check if PID is alive; if dead, cleanup
+   - Workspaces without PID file (Zellij): Check if Zellij session exists; if not, cleanup
+
+5. **Safety First:** Workspaces with uncommitted changes are always preserved.
+
+### Data Location
+
+All `hap` data is stored in `~/.local/share/hap/`:
+
+- `projects.csv` — Registered projects
 
 ## License
 

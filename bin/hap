@@ -7,10 +7,13 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.2.1"
+VERSION="0.3.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
+
+# PID lock file name (created inside workspaces)
+PID_LOCK_FILE=".hap.pid"
 
 # --- COLORS ---
 BLUE='\033[0;34m'
@@ -24,26 +27,149 @@ log_succ() { echo -e "${GREEN}OK:${NC}   $1"; }
 log_warn() { echo -e "${YELLOW}WARN:${NC} $1"; }
 log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
 
-ensure_setup() {
-  mkdir -p "$DATA_DIR"
-  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE"
+# --- CLEANUP FUNCTIONS ---
 
-  for cmd in zellij fzf git; do
-    if ! command -v $cmd &>/dev/null; then
-      log_err "Missing dependency: $cmd"
-      exit 1
+cleanup_workspace() {
+  local ws_path="$1"
+  local sources_dir="$2"
+
+  [[ ! -d "$ws_path" ]] && return 0
+
+  # Check for uncommitted changes
+  for repo in "$ws_path"/*; do
+    if [[ -e "$repo/.git" ]]; then
+      local status=$(git -C "$repo" status --porcelain 2>/dev/null || echo "")
+      if [[ -n "$status" ]]; then
+        log_warn "Preserving $(basename "$ws_path") — uncommitted changes"
+        return 1
+      fi
+    fi
+  done
+
+  # Move out of directory to avoid locks
+  cd / || true
+
+  # Remove worktrees
+  for repo in "$ws_path"/*; do
+    if [[ -e "$repo/.git" ]]; then
+      local repo_name=$(basename "$repo")
+      git -C "$sources_dir/$repo_name" worktree prune 2>/dev/null || true
+      git -C "$sources_dir/$repo_name" worktree remove "$repo" --force 2>/dev/null || true
+    fi
+  done
+
+  # Remove PID lock file first
+  rm -f "$ws_path/$PID_LOCK_FILE" 2>/dev/null || true
+
+  # Remove directory (with simple retry for any lingering handles)
+  local retry=0
+  while [[ -d "$ws_path" && $retry -lt 5 ]]; do
+    rm -rf "$ws_path" 2>/dev/null || true
+    [[ -d "$ws_path" ]] && sleep 0.2 || true
+    retry=$((retry + 1))
+  done
+
+  [[ ! -d "$ws_path" ]] && return 0 || return 1
+}
+
+# Check if a Zellij session exists
+zellij_session_exists() {
+  local session_name="$1"
+  if command -v zellij &>/dev/null; then
+    zellij list-sessions 2>/dev/null | grep -q "^${session_name}$" && return 0
+  fi
+  return 1
+}
+
+# Check if a PID is alive
+pid_is_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# Zombie cleanup - self-healing at startup
+cleanup_zombies() {
+  local project_root="$1"
+  local workspaces_dir="$project_root/workspaces"
+  local sources_dir="$project_root/sources"
+
+  [[ ! -d "$workspaces_dir" ]] && return
+
+  for ws_path in "$workspaces_dir"/*; do
+    [[ ! -d "$ws_path" ]] && continue
+    local ws_name=$(basename "$ws_path")
+
+    # Skip main workspace
+    [[ "$ws_name" == "main" ]] && continue
+
+    local pid_file="$ws_path/$PID_LOCK_FILE"
+
+    if [[ -f "$pid_file" ]]; then
+      # Has PID file - check if process is alive
+      local pid=$(cat "$pid_file" 2>/dev/null || echo "")
+      if ! pid_is_alive "$pid"; then
+        log_info "Cleaning zombie workspace: $ws_name (dead PID: $pid)"
+        if cleanup_workspace "$ws_path" "$sources_dir"; then
+          log_succ "Cleaned: $ws_name"
+        fi
+      fi
+    else
+      # No PID file - legacy or Zellij workspace
+      # Check if Zellij session exists
+      local session_name="$(basename "$project_root")-$ws_name"
+      if ! zellij_session_exists "$session_name"; then
+        log_info "Cleaning orphaned workspace: $ws_name (no active session)"
+        if cleanup_workspace "$ws_path" "$sources_dir"; then
+          log_succ "Cleaned: $ws_name"
+        fi
+      fi
     fi
   done
 }
 
-# Launch Zellij session
-# Kill stale sessions before starting
+# Run zombie cleanup for all registered projects
+cleanup_all_zombies() {
+  [[ ! -f "$DB_FILE" ]] && return
+
+  while IFS='|' read -r name path; do
+    [[ -z "$name" || -z "$path" ]] && continue
+    [[ -d "$path" ]] && cleanup_zombies "$path"
+  done <"$DB_FILE"
+}
+
+# --- SETUP ---
+
+ensure_setup() {
+  local editor="${1:-zellij}"
+  mkdir -p "$DATA_DIR"
+  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE" || true
+
+  # Check dependencies
+  for cmd in fzf git; do
+    if ! command -v "$cmd" &>/dev/null; then
+      log_err "Missing dependency: $cmd"
+      exit 1
+    fi
+  done
+
+  if ! command -v "$editor" &>/dev/null; then
+    log_err "Missing dependency: $editor"
+    exit 1
+  fi
+
+  # Clean up zombies from all projects
+  cleanup_all_zombies
+}
+
+# --- SESSION LAUNCH ---
+
 launch_session() {
   local project_name="$1"
   local workspace_path="$2"
   local session_name="$3"
   local mode="$4"
   local project_root="$5"
+  local editor="${6:-zellij}"
 
   [[ ! -d "$workspace_path" ]] && {
     log_err "Path not found: $workspace_path"
@@ -52,193 +178,194 @@ launch_session() {
 
   cd "$workspace_path" || exit 1
 
-  # Prune. Silence error if session doesn't exist.
-  if command -v zellij &>/dev/null; then
+  log_info "Launching $project_name ($mode) with $editor..."
+
+  case "$editor" in
+  zellij)
+    # Prune Zellij session if it exists
     zellij delete-session "$session_name" 2>/dev/null || true
-  fi
 
-  log_info "Launching $project_name ($mode)..."
+    local layout_file=""
+    local project_config_dir="$project_root/config"
 
-  local layout_file=""
-  local project_config_dir="$project_root/config"
-
-  # Priority: requested mode -> fallback mode -> default
-  if [[ "$mode" == "lite" ]]; then
-    if [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
-      layout_file="$project_config_dir/hap-lite.kdl"
-    elif [[ -f "$project_config_dir/hap.kdl" ]]; then
-      log_warn "hap-lite.kdl missing, falling back to full layout"
-      layout_file="$project_config_dir/hap.kdl"
+    # Priority: requested mode -> fallback mode -> default
+    if [[ "$mode" == "lite" ]]; then
+      if [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
+        layout_file="$project_config_dir/hap-lite.kdl"
+      elif [[ -f "$project_config_dir/hap.kdl" ]]; then
+        log_warn "hap-lite.kdl missing, falling back to full layout"
+        layout_file="$project_config_dir/hap.kdl"
+      fi
+    else
+      if [[ -f "$project_config_dir/hap.kdl" ]]; then
+        layout_file="$project_config_dir/hap.kdl"
+      elif [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
+        log_warn "hap.kdl missing, using lite layout"
+        layout_file="$project_config_dir/hap-lite.kdl"
+      fi
     fi
-  else
-    # Default/Full mode
-    if [[ -f "$project_config_dir/hap.kdl" ]]; then
-      layout_file="$project_config_dir/hap.kdl"
-    elif [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
-      log_warn "hap.kdl missing, using lite layout"
-      layout_file="$project_config_dir/hap-lite.kdl"
-    fi
-  fi
 
-  # Build args
-  local args=()
-  [[ -n "$layout_file" ]] && args+=("--new-session-with-layout" "$layout_file")
-  args+=("--session" "$session_name")
+    local args=()
+    [[ -n "$layout_file" ]] && args+=("--new-session-with-layout" "$layout_file") || true
+    args+=("--session" "$session_name")
 
-  # Detach from current session if any, to avoid potential errors
-  unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
+    unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
+    log_info "Command: zellij ${args[*]}"
 
-  log_info "Command: zellij ${args[*]}"
-  env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID command zellij "${args[@]}"
+    # Run as subprocess so script survives and cleanup can run
+    env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || true
+    ;;
+  cursor | antigravity)
+    log_info "Command: $editor --new-window --wait ."
+    # Script blocks here until editor window closes
+    "$editor" --new-window --wait . || true
+    ;;
+  *)
+    log_err "Unsupported editor: $editor"
+    exit 1
+    ;;
+  esac
 }
 
-# The core Agent logic.
-# 1. Checks if workspace exists.
-# 2. Creates git worktrees from 'sources/' into 'workspaces/'.
-# 3. Background installs dependencies (pnpm/go).
-# 4. Launches Zellij in the new ephemeral workspace.
-# 5. Cleans up (deletes folder/prunes worktree) ONLY if git status is clean.
+# --- AGENT WORKSPACE ---
+
+# Global variables for cleanup trap
+_CLEANUP_WS_PATH=""
+_CLEANUP_SOURCES_DIR=""
+_CLEANUP_TASK_NAME=""
+
+# Cleanup function for trap - must be idempotent
+do_cleanup() {
+  # Avoid recursive calls
+  trap - EXIT SIGINT SIGTERM SIGHUP
+
+  [[ -z "$_CLEANUP_WS_PATH" ]] && return 0
+  [[ ! -d "$_CLEANUP_WS_PATH" ]] && return 0
+
+  log_info "Cleaning up workspace: $_CLEANUP_TASK_NAME"
+  if cleanup_workspace "$_CLEANUP_WS_PATH" "$_CLEANUP_SOURCES_DIR"; then
+    log_succ "Workspace cleaned: $_CLEANUP_TASK_NAME"
+  fi
+
+  # Clear variables to prevent double cleanup
+  _CLEANUP_WS_PATH=""
+  _CLEANUP_SOURCES_DIR=""
+  _CLEANUP_TASK_NAME=""
+}
+
 create_agent_workspace() {
   local project_root="$1"
   local project_name="$2"
   local agent_task="$3"
   local base_branch="$4"
+  local editor="${5:-zellij}"
 
   local sources_dir="$project_root/sources"
   local target_ws="$project_root/workspaces/$agent_task"
-  local config_dir="$project_root/config"
+
+  # Set global variables for cleanup trap
+  _CLEANUP_WS_PATH="$target_ws"
+  _CLEANUP_SOURCES_DIR="$sources_dir"
+  _CLEANUP_TASK_NAME="$agent_task"
+
+  # Set up signal trapping for robust cleanup
+  trap 'do_cleanup' EXIT SIGINT SIGTERM SIGHUP
 
   if [[ -d "$target_ws" ]]; then
     log_warn "Resuming existing workspace: $agent_task"
-    launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root"
-    return
-  fi
+  else
+    log_info "Spawning Agent: $agent_task (Base: $base_branch)"
+    mkdir -p "$target_ws"
 
-  log_info "Spawning Agent: $agent_task (Base: $base_branch)"
-  mkdir -p "$target_ws"
-
-  # Create worktrees
-  for repo in "$sources_dir"/*; do
-    if [[ -d "$repo" && -d "$repo/.git" ]]; then
-      local repo_name=$(basename "$repo")
-      local branch_name="agent/$agent_task/$repo_name"
-
-      # Prune stale worktrees to avoid "missing but already registered" error
-      git -C "$repo" worktree prune
-
-      # Try creating worktree. If branch exists, fall back to checking it out.
-      if ! git -C "$repo" worktree add "$target_ws/$repo_name" -b "$branch_name" "$base_branch" 2>/dev/null; then
-        git -C "$repo" worktree add "$target_ws/$repo_name" "$branch_name"
-      fi
-
-      # Shared State Linking
-      if [[ -d "$project_root/shared/$repo_name" ]]; then
-        log_info "Linking shared state for $repo_name..."
-        (
-          cd "$project_root/shared/$repo_name" || exit
-          find . -type f | while read -r file; do
-            # Remove leading ./
-            local clean_file="${file#./}"
-            local dest_file="$target_ws/$repo_name/$clean_file"
-            local dest_dir=$(dirname "$dest_file")
-
-            mkdir -p "$dest_dir"
-
-            # Calculate relative steps back to project root
-            # Base: workspaces(1) / task(2) / repo(3) -> 3 levels up
-            local ups="../../../"
-
-            # Add ups for subdirectories in the file path
-            local subdir=$(dirname "$clean_file")
-            if [[ "$subdir" != "." ]]; then
-              # Count components
-              local sub_depth=$(echo "$subdir" | awk -F/ '{print NF}')
-              for ((i = 0; i < sub_depth; i++)); do ups="../$ups"; done
-            fi
-
-            ln -sf "${ups}shared/$repo_name/$clean_file" "$dest_file"
-          done
-        )
-      fi
-
-      # Smart Install (Background)
-      if [[ -f "$target_ws/$repo_name/pnpm-lock.yaml" ]]; then
-        (cd "$target_ws/$repo_name" && pnpm install --frozen-lockfile --silent &)
-      elif [[ -f "$target_ws/$repo_name/go.mod" ]]; then
-        (cd "$target_ws/$repo_name" && go mod download &)
-      fi
-    fi
-  done
-  wait
-
-  log_succ "Workspace ready"
-
-  # Subshell to keep environment clean before cleanup
-  (
-    cd "$target_ws" || exit 1
-    launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root"
-  )
-
-  cleanup_workspace "$target_ws" "$sources_dir"
-}
-
-cleanup_workspace() {
-  local ws_path="$1"
-  local sources_dir="$2"
-  local dirty=0
-
-  # Safety check: Never cleanup the root workspaces directory
-  if [[ "$ws_path" == *"/workspaces" || "$ws_path" == *"/workspaces/" ]]; then
-    log_err "Invalid workspace path for cleanup: $ws_path"
-    return
-  fi
-
-  # Check for uncommitted changes
-  for repo in "$ws_path"/*; do
-    if [[ -e "$repo/.git" ]]; then
-      if [[ -n $(git -C "$repo" status --porcelain) ]]; then
-        dirty=1
-      fi
-    fi
-  done
-
-  if [[ $dirty -eq 0 ]]; then
-    log_info "Workspace clean. Pruning..."
-    for repo in "$ws_path"/*; do
-      if [[ -e "$repo/.git" ]]; then
+    # Create worktrees
+    for repo in "$sources_dir"/*; do
+      if [[ -d "$repo" && -d "$repo/.git" ]]; then
         local repo_name=$(basename "$repo")
-        git -C "$sources_dir/$repo_name" worktree remove "$repo" --force
+        local branch_name="agent/$agent_task/$repo_name"
+
+        git -C "$repo" worktree prune
+
+        if ! git -C "$repo" worktree add "$target_ws/$repo_name" -b "$branch_name" "$base_branch" 2>/dev/null; then
+          git -C "$repo" worktree add "$target_ws/$repo_name" "$branch_name"
+        fi
+
+        # Shared State Linking
+        if [[ -d "$project_root/shared/$repo_name" ]]; then
+          log_info "Linking shared state for $repo_name..."
+          (
+            cd "$project_root/shared/$repo_name" || exit
+            find . -type f | while read -r file; do
+              local clean_file="${file#./}"
+              local dest_file="$target_ws/$repo_name/$clean_file"
+              local dest_dir=$(dirname "$dest_file")
+
+              mkdir -p "$dest_dir"
+
+              local ups="../../../"
+              local subdir=$(dirname "$clean_file")
+              if [[ "$subdir" != "." ]]; then
+                local sub_depth=$(echo "$subdir" | awk -F/ '{print NF}')
+                for ((i = 0; i < sub_depth; i++)); do ups="../$ups"; done
+              fi
+
+              ln -sf "${ups}shared/$repo_name/$clean_file" "$dest_file"
+            done
+          )
+        fi
+
+        # Smart Install (Background)
+        if [[ -f "$target_ws/$repo_name/pnpm-lock.yaml" ]]; then
+          (cd "$target_ws/$repo_name" && pnpm install --frozen-lockfile --silent &)
+        elif [[ -f "$target_ws/$repo_name/go.mod" ]]; then
+          (cd "$target_ws/$repo_name" && go mod download &)
+        fi
       fi
     done
-    rm -rf "$ws_path"
-    log_succ "Destroyed"
-  else
-    log_warn "Uncommitted changes detected. Workspace preserved."
-    log_warn "Location: $ws_path"
+    wait
+    log_succ "Workspace ready"
   fi
+
+  # Create PID lock file for zombie cleanup detection
+  echo "$$" >"$target_ws/$PID_LOCK_FILE"
+
+  # Launch session - blocking call for all editors
+  local original_dir=$(pwd)
+  cd "$target_ws" || exit 1
+  launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root" "$editor"
+  cd "$original_dir" || true
+
+  # Cleanup runs via trap or here when editor exits
+  trap - EXIT SIGINT SIGTERM SIGHUP
+  do_cleanup
 }
+
+# --- CLI ---
 
 usage() {
-  echo "Usage: $APP_NAME [options]"
-  echo "  -s <name> [path]    Save project"
-  echo "  -w <name> <task>    Start AGENT workspace (Lite mode)"
-  echo "  -m <lite|full>      Force mode"
-  echo "  -b <branch>         Base branch for agent (default: dev)"
-  echo "  -d <name>           Delete project"
-  echo "  -l                  List projects"
-  echo "  -v                  Show version"
-  echo "  (no args)           Open interactive selection"
+  cat <<EOF
+Usage: $APP_NAME [options]
+  -s <name> [path]    Save project
+  -w <name> <task>    Start AGENT workspace (Lite mode)
+  -m <lite|full>      Force mode
+  -e <editor>         Editor: zellij, cursor, antigravity (default: zellij)
+  -b <branch>         Base branch for agent (default: dev)
+  -d <name>           Delete project
+  -l                  List projects
+  -v                  Show version
+  (no args)           Open interactive selection
+EOF
 }
 
-ensure_setup
+# --- MAIN ---
 
 PROJECT_ARG=""
 TASK_ARG=""
 BRANCH_ARG="dev"
 MODE_ARG="default"
+EDITOR_ARG="zellij"
 ACTION="interactive"
 
-while getopts "s:d:p:w:b:m:lhv" opt; do
+while getopts "s:d:p:w:b:m:e:lhv" opt; do
   case $opt in
   s)
     ACTION="save"
@@ -261,6 +388,7 @@ while getopts "s:d:p:w:b:m:lhv" opt; do
     ;;
   b) BRANCH_ARG="$OPTARG" ;;
   m) MODE_ARG="$OPTARG" ;;
+  e) EDITOR_ARG="$OPTARG" ;;
   v)
     echo "hap v$VERSION"
     exit 0
@@ -290,6 +418,8 @@ while getopts "s:d:p:w:b:m:lhv" opt; do
   esac
 done
 
+ensure_setup "$EDITOR_ARG"
+
 case $ACTION in
 save)
   [[ "$PROJECT_PATH" == "." ]] && FULL_PATH="$(pwd)" || FULL_PATH="$(cd "$PROJECT_PATH" && pwd)"
@@ -302,7 +432,7 @@ open)
     log_err "Project not found: $PROJECT_ARG"
     exit 1
   fi
-  launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$MODE_ARG" "$PATH_TO_ROOT"
+  launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$MODE_ARG" "$PATH_TO_ROOT" "$EDITOR_ARG"
   ;;
 worktree)
   PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
@@ -310,7 +440,7 @@ worktree)
     log_err "Project not found: $PROJECT_ARG"
     exit 1
   fi
-  create_agent_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG"
+  create_agent_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG" "$EDITOR_ARG"
   ;;
 interactive)
   if [[ ! -s "$DB_FILE" ]]; then
@@ -321,7 +451,7 @@ interactive)
   if [[ -n "$SELECTION" ]]; then
     NAME=$(echo "$SELECTION" | cut -d '|' -f 1)
     PATH_TO_ROOT=$(echo "$SELECTION" | cut -d '|' -f 2)
-    launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$MODE_ARG" "$PATH_TO_ROOT"
+    launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$MODE_ARG" "$PATH_TO_ROOT" "$EDITOR_ARG"
   fi
   ;;
 esac
