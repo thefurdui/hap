@@ -9,7 +9,7 @@
 Most project managers just `cd` into a folder. `hap` manages **parallel universes**.
 
 1.  **The Hive Structure:** Separates `sources` (git history) from `workspaces` (active state).
-2.  **Agent Mode:** Instantly spawn a temporary, isolated workspace (`hap -w`) for an AI agent or a quick hotfix.
+2.  **Workspace Mode:** Instantly spawn a temporary, isolated workspace (`hap -w`) for an AI agent or a quick hotfix.
 3.  **Auto-Cleanup:** When you close the session, `hap` checks for uncommitted changes. If clean, it nukes the temporary workspace. No `git stash` required.
 4.  **Dual Modes:** Support for Heavy layouts (Servers/DBs) and Lite layouts (Editor only).
 
@@ -51,7 +51,7 @@ make install
 2.  **Shared State (Optional):**
     If you have files that are NOT in git (like `.env` files, local certificates, or IDE configs) but need them in every ephemeral workspace:
     - Create a folder in `shared/` named exactly like the repo in `sources/`.
-    - Any file placed in `shared/repo-name/` will be automatically symlinked into the agent's workspace when created.
+    - Any file placed in `shared/repo-name/` will be automatically symlinked into the workspace when created.
 
 3.  **Configure the Layouts:**
     Copy the files from `templates/` into your `config/` folder and adapt them:
@@ -83,9 +83,19 @@ hap -w your-project backend-fix
 
 - Creates `workspaces/backend-fix`.
 - Creates fresh git worktrees from `sources/`.
+    - Default branch: `hap/backend-fix/repo-name`
 - Installs dependencies (pnpm/go) in the background.
 - Opens Zellij using `hap-lite.kdl` (No servers, just code + agent).
 - **On Exit:** If git status is clean, the workspace self-destructs.
+
+**Target Branch Control:**
+You can specify a target branch name instead of the default `hap/` prefix.
+
+```bash
+hap -w your-project login-feature -B feat/login
+```
+- Creates `workspaces/login-feature`.
+- Checks out branch `feat/login/repo-name`.
 
 **Manual Mode Selection:**
 Open the Main workspace, but skip the heavy server startup (uses `hap-lite.kdl`).

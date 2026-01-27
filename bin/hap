@@ -7,7 +7,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.3.0"
+VERSION="0.4.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -227,7 +227,7 @@ launch_session() {
   esac
 }
 
-# --- AGENT WORKSPACE ---
+# --- WORKSPACE ---
 
 # Global variables for cleanup trap
 _CLEANUP_WS_PATH=""
@@ -253,12 +253,13 @@ do_cleanup() {
   _CLEANUP_TASK_NAME=""
 }
 
-create_agent_workspace() {
+create_workspace() {
   local project_root="$1"
   local project_name="$2"
   local agent_task="$3"
   local base_branch="$4"
   local editor="${5:-zellij}"
+  local target_branch_prefix="$6"
 
   local sources_dir="$project_root/sources"
   local target_ws="$project_root/workspaces/$agent_task"
@@ -274,14 +275,20 @@ create_agent_workspace() {
   if [[ -d "$target_ws" ]]; then
     log_warn "Resuming existing workspace: $agent_task"
   else
-    log_info "Spawning Agent: $agent_task (Base: $base_branch)"
+    log_info "Spawning Workspace: $agent_task (Base: $base_branch)"
     mkdir -p "$target_ws"
 
     # Create worktrees
     for repo in "$sources_dir"/*; do
       if [[ -d "$repo" && -d "$repo/.git" ]]; then
         local repo_name=$(basename "$repo")
-        local branch_name="agent/$agent_task/$repo_name"
+        local branch_name=""
+
+        if [[ -n "$target_branch_prefix" ]]; then
+          branch_name="${target_branch_prefix}/${repo_name}"
+        else
+          branch_name="hap/${agent_task}/${repo_name}"
+        fi
 
         git -C "$repo" worktree prune
 
@@ -345,10 +352,11 @@ usage() {
   cat <<EOF
 Usage: $APP_NAME [options]
   -s <name> [path]    Save project
-  -w <name> <task>    Start AGENT workspace (Lite mode)
+  -w <name> <task>    Start workspace (Lite mode)
   -m <lite|full>      Force mode
   -e <editor>         Editor: zellij, cursor, antigravity (default: zellij)
-  -b <branch>         Base branch for agent (default: dev)
+  -b <branch>         Base branch for workspace (default: dev)
+  -B <branch>         Target branch name (default: hap/<task>)
   -d <name>           Delete project
   -l                  List projects
   -v                  Show version
@@ -361,11 +369,12 @@ EOF
 PROJECT_ARG=""
 TASK_ARG=""
 BRANCH_ARG="dev"
+TARGET_BRANCH_ARG=""
 MODE_ARG="default"
 EDITOR_ARG="zellij"
 ACTION="interactive"
 
-while getopts "s:d:p:w:b:m:e:lhv" opt; do
+while getopts "s:d:p:w:b:B:m:e:lhv" opt; do
   case $opt in
   s)
     ACTION="save"
@@ -387,6 +396,7 @@ while getopts "s:d:p:w:b:m:e:lhv" opt; do
     PROJECT_ARG="$OPTARG"
     ;;
   b) BRANCH_ARG="$OPTARG" ;;
+  B) TARGET_BRANCH_ARG="$OPTARG" ;;
   m) MODE_ARG="$OPTARG" ;;
   e) EDITOR_ARG="$OPTARG" ;;
   v)
@@ -440,7 +450,7 @@ worktree)
     log_err "Project not found: $PROJECT_ARG"
     exit 1
   fi
-  create_agent_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG" "$EDITOR_ARG"
+  create_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG" "$EDITOR_ARG" "$TARGET_BRANCH_ARG"
   ;;
 interactive)
   if [[ ! -s "$DB_FILE" ]]; then
