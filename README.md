@@ -10,7 +10,7 @@ Most project managers just `cd` into a folder. `hap` manages **parallel universe
 
 1.  **The Hive Structure:** Separates `sources` (git history) from `workspaces` (active state).
 2.  **Workspace Mode:** Instantly spawn a temporary, isolated workspace (`hap -w`) for an AI agent or a quick hotfix.
-3.  **Auto-Cleanup:** When you close the session, `hap` checks for uncommitted changes. If clean, it nukes the temporary workspace. No `git stash` required.
+3.  **Explicit Cleanup:** Workspaces persist after you close the editor. Use the dedicated cleanup command to remove them and their branches when done.
 4.  **Dual Modes:** Support for Heavy layouts (Servers/DBs) and Lite layouts (Editor only).
 
 ## Installation
@@ -84,9 +84,19 @@ hap -w your-project backend-fix
 - Creates `workspaces/backend-fix`.
 - Creates fresh git worktrees from `sources/`.
     - Default branch: `hap/backend-fix/repo-name`
+- Pushes the new branch to `origin` immediately.
 - Installs dependencies (pnpm/go) in the background.
 - Opens Zellij using `hap-lite.kdl` (No servers, just code + agent).
-- **On Exit:** If git status is clean, the workspace self-destructs.
+- **On Exit:** The workspace remains.
+
+**Cleanup:**
+When you are done with a task, use the cleanup command.
+
+```bash
+hap -c your-project backend-fix      # Clean local workspace & branch
+hap -c your-project backend-fix -D   # Clean local + DELETE REMOTE branch (Prompts confirmation)
+hap -c your-project                  # Bulk clean all inactive, clean workspaces
+```
 
 **Target Branch Control:**
 You can specify a target branch name instead of the default `hap/` prefix.
@@ -120,22 +130,16 @@ Currently supported values for `-e`: `zellij` (default), `cursor`, `antigravity`
 
 ### Supervisor Pattern
 
-`hap` uses a "Supervisor Pattern" for managing workspace lifecycles:
+`hap` uses a lightweight "Supervisor Pattern" for managing workspace lifecycles:
 
-1. **PID Lock (GUI Editors):** When using `cursor` or `antigravity`, a `.hap.pid` file is created in the workspace containing the script's PID. The script blocks (via `--wait`) until the editor closes.
-
-2. **Process Replacement (Zellij):** When using Zellij, the script uses `exec` to replace itself with the Zellij process. No PID file is created since the shell process dies.
-
-3. **Signal Trapping:** Robust `trap` on `EXIT SIGINT SIGTERM SIGHUP` ensures cleanup runs even if:
-   - User `Cmd+Q`s the GUI editor
-   - Terminal is killed
-   - Process receives interrupt signals
-
-4. **Zombie Cleanup (Self-Healing):** On every `hap` invocation, orphaned workspaces are detected and cleaned:
-   - Workspaces with `.hap.pid`: Check if PID is alive; if dead, cleanup
-   - Workspaces without PID file (Zellij): Check if Zellij session exists; if not, cleanup
-
-5. **Safety First:** Workspaces with uncommitted changes are always preserved.
+1. **PID Lock:** A `.hap.pid` file is created in every workspace upon creation.
+2. **Activity Tracking:**
+   - **GUI Editors:** The script blocks (via `--wait`) until the editor closes.
+   - **Zellij:** The script waits for the Zellij process to exit.
+3. **Cleanup:**
+   - When the editor exits, the PID file is removed, marking the workspace as "inactive."
+   - Running `hap -c <project>` scans for workspaces without a valid PID or Zellij session and cleans them up.
+4. **Safety First:** Workspaces with uncommitted changes are always preserved, even during forced cleanup.
 
 ### Data Location
 

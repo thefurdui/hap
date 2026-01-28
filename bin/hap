@@ -7,7 +7,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.4.0"
+VERSION="0.5.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -27,11 +27,28 @@ log_succ() { echo -e "${GREEN}OK:${NC}   $1"; }
 log_warn() { echo -e "${YELLOW}WARN:${NC} $1"; }
 log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
 
+# --- HELPERS ---
+
+zellij_session_exists() {
+  local session_name="$1"
+  if command -v zellij &>/dev/null; then
+    zellij list-sessions 2>/dev/null | grep -q "^${session_name}$" && return 0
+  fi
+  return 1
+}
+
+pid_is_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
 # --- CLEANUP FUNCTIONS ---
 
 cleanup_workspace() {
   local ws_path="$1"
   local sources_dir="$2"
+  local delete_local="${3:-false}"
+  local delete_remote="${4:-false}"
 
   [[ ! -d "$ws_path" ]] && return 0
 
@@ -45,6 +62,19 @@ cleanup_workspace() {
       fi
     fi
   done
+
+  # Collect branches to delete if requested
+  local branches_to_delete=()
+  if [[ "$delete_local" == "true" || "$delete_remote" == "true" ]]; then
+    for repo in "$ws_path"/*; do
+      if [[ -e "$repo/.git" ]]; then
+        local branch=$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null || echo "")
+        if [[ -n "$branch" ]]; then
+          branches_to_delete+=("$(basename "$repo")|$branch")
+        fi
+      fi
+    done
+  fi
 
   # Move out of directory to avoid locks
   cd / || true
@@ -61,7 +91,7 @@ cleanup_workspace() {
   # Remove PID lock file first
   rm -f "$ws_path/$PID_LOCK_FILE" 2>/dev/null || true
 
-  # Remove directory (with simple retry for any lingering handles)
+  # Remove directory (with simple retry)
   local retry=0
   while [[ -d "$ws_path" && $retry -lt 5 ]]; do
     rm -rf "$ws_path" 2>/dev/null || true
@@ -69,72 +99,93 @@ cleanup_workspace() {
     retry=$((retry + 1))
   done
 
-  [[ ! -d "$ws_path" ]] && return 0 || return 1
-}
+  if [[ ! -d "$ws_path" ]]; then
+    # Delete refs if requested
+    for item in "${branches_to_delete[@]}"; do
+      local repo_name="${item%|*}"
+      local branch="${item#*|}"
+      local source_repo="$sources_dir/$repo_name"
 
-# Check if a Zellij session exists
-zellij_session_exists() {
-  local session_name="$1"
-  if command -v zellij &>/dev/null; then
-    zellij list-sessions 2>/dev/null | grep -q "^${session_name}$" && return 0
+      if [[ -d "$source_repo" ]]; then
+        if [[ "$delete_remote" == "true" ]]; then
+          log_info "Deleting remote branch $branch for $repo_name..."
+          git -C "$source_repo" push origin --delete "$branch" 2>/dev/null || true
+        fi
+        if [[ "$delete_local" == "true" ]]; then
+          log_info "Deleting local branch $branch for $repo_name..."
+          git -C "$source_repo" branch -D "$branch" 2>/dev/null || true
+        fi
+      fi
+    done
+    return 0
+  else
+    return 1
   fi
-  return 1
 }
 
-# Check if a PID is alive
-pid_is_alive() {
-  local pid="$1"
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
-}
-
-# Zombie cleanup - self-healing at startup
-cleanup_zombies() {
+cleanup_project_workspaces() {
   local project_root="$1"
-  local workspaces_dir="$project_root/workspaces"
+  local task="$2"
   local sources_dir="$project_root/sources"
+  local workspaces_dir="$project_root/workspaces"
 
   [[ ! -d "$workspaces_dir" ]] && return
 
-  for ws_path in "$workspaces_dir"/*; do
-    [[ ! -d "$ws_path" ]] && continue
-    local ws_name=$(basename "$ws_path")
-
-    # Skip main workspace
-    [[ "$ws_name" == "main" ]] && continue
-
-    local pid_file="$ws_path/$PID_LOCK_FILE"
-
-    if [[ -f "$pid_file" ]]; then
-      # Has PID file - check if process is alive
-      local pid=$(cat "$pid_file" 2>/dev/null || echo "")
-      if ! pid_is_alive "$pid"; then
-        log_info "Cleaning zombie workspace: $ws_name (dead PID: $pid)"
-        if cleanup_workspace "$ws_path" "$sources_dir"; then
-          log_succ "Cleaned: $ws_name"
-        fi
-      fi
-    else
-      # No PID file - legacy or Zellij workspace
-      # Check if Zellij session exists
-      local session_name="$(basename "$project_root")-$ws_name"
-      if ! zellij_session_exists "$session_name"; then
-        log_info "Cleaning orphaned workspace: $ws_name (no active session)"
-        if cleanup_workspace "$ws_path" "$sources_dir"; then
-          log_succ "Cleaned: $ws_name"
-        fi
-      fi
+  # Confirmation for Remote Delete
+  if [[ "$DELETE_REMOTE" == "true" && "$CONFIRM_YES" != "true" ]]; then
+    echo -n "WARNING: You are about to delete REMOTE branches. This cannot be undone. Continue? [y/N] "
+    read -r response
+    if [[ ! "$response" =~ ^[yY]$ ]]; then
+      log_warn "Aborted by user."
+      return
     fi
-  done
-}
+  fi
 
-# Run zombie cleanup for all registered projects
-cleanup_all_zombies() {
-  [[ ! -f "$DB_FILE" ]] && return
+  local delete_local="true"
+  local delete_remote="$DELETE_REMOTE"
 
-  while IFS='|' read -r name path; do
-    [[ -z "$name" || -z "$path" ]] && continue
-    [[ -d "$path" ]] && cleanup_zombies "$path"
-  done <"$DB_FILE"
+  if [[ -n "$task" ]]; then
+    # TARGETED CLEANUP: TRUST THE USER.
+    # No checks for PID/Session. If they typed the name, they want it gone.
+    local ws_path="$workspaces_dir/$task"
+    log_info "Cleaning workspace: $task"
+    if cleanup_workspace "$ws_path" "$sources_dir" "$delete_local" "$delete_remote"; then
+      log_succ "Cleaned: $task"
+    else
+      log_warn "Failed to clean: $task (maybe uncommitted changes?)"
+    fi
+  else
+    # BULK CLEANUP: SAFETY IS PARAMOUNT.
+    # We must skip active workspaces.
+    log_info "Running bulk cleanup for inactive workspaces..."
+    for ws_path in "$workspaces_dir"/*; do
+      [[ ! -d "$ws_path" ]] && continue
+      local ws_name=$(basename "$ws_path")
+      [[ "$ws_name" == "main" ]] && continue
+
+      # CHECK ACTIVITY
+      local pid_file="$ws_path/$PID_LOCK_FILE"
+      local is_active=0
+
+      if [[ -f "$pid_file" ]]; then
+        local pid=$(cat "$pid_file" 2>/dev/null || echo "")
+        if pid_is_alive "$pid"; then is_active=1; fi
+      else
+        local session_name="$(basename "$project_root")-$ws_name"
+        if zellij_session_exists "$session_name"; then is_active=1; fi
+      fi
+
+      if [[ $is_active -eq 1 ]]; then
+        log_info "Skipping active workspace: $ws_name"
+        continue
+      fi
+
+      # It's inactive, safe to clean
+      if cleanup_workspace "$ws_path" "$sources_dir" "$delete_local" "$delete_remote"; then
+        log_succ "Cleaned: $ws_name"
+      fi
+    done
+  fi
 }
 
 # --- SETUP ---
@@ -144,7 +195,6 @@ ensure_setup() {
   mkdir -p "$DATA_DIR"
   [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE" || true
 
-  # Check dependencies
   for cmd in fzf git; do
     if ! command -v "$cmd" &>/dev/null; then
       log_err "Missing dependency: $cmd"
@@ -156,9 +206,6 @@ ensure_setup() {
     log_err "Missing dependency: $editor"
     exit 1
   fi
-
-  # Clean up zombies from all projects
-  cleanup_all_zombies
 }
 
 # --- SESSION LAUNCH ---
@@ -182,13 +229,11 @@ launch_session() {
 
   case "$editor" in
   zellij)
-    # Prune Zellij session if it exists
     zellij delete-session "$session_name" 2>/dev/null || true
 
     local layout_file=""
     local project_config_dir="$project_root/config"
 
-    # Priority: requested mode -> fallback mode -> default
     if [[ "$mode" == "lite" ]]; then
       if [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
         layout_file="$project_config_dir/hap-lite.kdl"
@@ -211,13 +256,10 @@ launch_session() {
 
     unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
     log_info "Command: zellij ${args[*]}"
-
-    # Run as subprocess so script survives and cleanup can run
     env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || true
     ;;
   cursor | antigravity)
     log_info "Command: $editor --new-window --wait ."
-    # Script blocks here until editor window closes
     "$editor" --new-window --wait . || true
     ;;
   *)
@@ -228,30 +270,6 @@ launch_session() {
 }
 
 # --- WORKSPACE ---
-
-# Global variables for cleanup trap
-_CLEANUP_WS_PATH=""
-_CLEANUP_SOURCES_DIR=""
-_CLEANUP_TASK_NAME=""
-
-# Cleanup function for trap - must be idempotent
-do_cleanup() {
-  # Avoid recursive calls
-  trap - EXIT SIGINT SIGTERM SIGHUP
-
-  [[ -z "$_CLEANUP_WS_PATH" ]] && return 0
-  [[ ! -d "$_CLEANUP_WS_PATH" ]] && return 0
-
-  log_info "Cleaning up workspace: $_CLEANUP_TASK_NAME"
-  if cleanup_workspace "$_CLEANUP_WS_PATH" "$_CLEANUP_SOURCES_DIR"; then
-    log_succ "Workspace cleaned: $_CLEANUP_TASK_NAME"
-  fi
-
-  # Clear variables to prevent double cleanup
-  _CLEANUP_WS_PATH=""
-  _CLEANUP_SOURCES_DIR=""
-  _CLEANUP_TASK_NAME=""
-}
 
 create_workspace() {
   local project_root="$1"
@@ -264,21 +282,12 @@ create_workspace() {
   local sources_dir="$project_root/sources"
   local target_ws="$project_root/workspaces/$agent_task"
 
-  # Set global variables for cleanup trap
-  _CLEANUP_WS_PATH="$target_ws"
-  _CLEANUP_SOURCES_DIR="$sources_dir"
-  _CLEANUP_TASK_NAME="$agent_task"
-
-  # Set up signal trapping for robust cleanup
-  trap 'do_cleanup' EXIT SIGINT SIGTERM SIGHUP
-
   if [[ -d "$target_ws" ]]; then
     log_warn "Resuming existing workspace: $agent_task"
   else
     log_info "Spawning Workspace: $agent_task (Base: $base_branch)"
     mkdir -p "$target_ws"
 
-    # Create worktrees
     for repo in "$sources_dir"/*; do
       if [[ -d "$repo" && -d "$repo/.git" ]]; then
         local repo_name=$(basename "$repo")
@@ -295,6 +304,8 @@ create_workspace() {
         if ! git -C "$repo" worktree add "$target_ws/$repo_name" -b "$branch_name" "$base_branch" 2>/dev/null; then
           git -C "$repo" worktree add "$target_ws/$repo_name" "$branch_name"
         fi
+
+        git -C "$target_ws/$repo_name" push -u origin "$branch_name" 2>/dev/null || true
 
         # Shared State Linking
         if [[ -d "$project_root/shared/$repo_name" ]]; then
@@ -320,7 +331,6 @@ create_workspace() {
           )
         fi
 
-        # Smart Install (Background)
         if [[ -f "$target_ws/$repo_name/pnpm-lock.yaml" ]]; then
           (cd "$target_ws/$repo_name" && pnpm install --frozen-lockfile --silent &)
         elif [[ -f "$target_ws/$repo_name/go.mod" ]]; then
@@ -332,18 +342,16 @@ create_workspace() {
     log_succ "Workspace ready"
   fi
 
-  # Create PID lock file for zombie cleanup detection
+  # Create PID lock file (Needed for BULK cleanup safety)
   echo "$$" >"$target_ws/$PID_LOCK_FILE"
 
-  # Launch session - blocking call for all editors
   local original_dir=$(pwd)
   cd "$target_ws" || exit 1
   launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root" "$editor"
-  cd "$original_dir" || true
 
-  # Cleanup runs via trap or here when editor exits
-  trap - EXIT SIGINT SIGTERM SIGHUP
-  do_cleanup
+  # Remove PID when editor exits (Mark as inactive for Bulk cleanup)
+  rm -f "$target_ws/$PID_LOCK_FILE"
+  cd "$original_dir" || true
 }
 
 # --- CLI ---
@@ -353,6 +361,9 @@ usage() {
 Usage: $APP_NAME [options]
   -s <name> [path]    Save project
   -w <name> <task>    Start workspace (Lite mode)
+  -c <name> [task]    Cleanup workspace(s) (Default: local only)
+  -D                  Force delete remote branch (Used with -c)
+  -y                  Confirm dangerous actions (Used with -D)
   -m <lite|full>      Force mode
   -e <editor>         Editor: zellij, cursor, antigravity (default: zellij)
   -b <branch>         Base branch for workspace (default: dev)
@@ -373,8 +384,10 @@ TARGET_BRANCH_ARG=""
 MODE_ARG="default"
 EDITOR_ARG="zellij"
 ACTION="interactive"
+DELETE_REMOTE="false"
+CONFIRM_YES="false"
 
-while getopts "s:d:p:w:b:B:m:e:lhv" opt; do
+while getopts "s:d:p:w:b:B:m:e:c:Dy:lhv" opt; do
   case $opt in
   s)
     ACTION="save"
@@ -413,6 +426,18 @@ while getopts "s:d:p:w:b:B:m:e:lhv" opt; do
     }
     OPTIND=$((OPTIND + 1))
     ;;
+  c)
+    ACTION="cleanup"
+    PROJECT_ARG="$OPTARG"
+    eval "TASK_ARG=\${$OPTIND}"
+    if [[ -n "$TASK_ARG" && "$TASK_ARG" != -* ]]; then
+      OPTIND=$((OPTIND + 1))
+    else
+      TASK_ARG=""
+    fi
+    ;;
+  D) DELETE_REMOTE="true" ;;
+  y) CONFIRM_YES="true" ;;
   l)
     column -t -s "|" "$DB_FILE"
     exit 0
@@ -451,6 +476,14 @@ worktree)
     exit 1
   fi
   create_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG" "$EDITOR_ARG" "$TARGET_BRANCH_ARG"
+  ;;
+cleanup)
+  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  if [[ -z "$PATH_TO_ROOT" ]]; then
+    log_err "Project not found: $PROJECT_ARG"
+    exit 1
+  fi
+  cleanup_project_workspaces "$PATH_TO_ROOT" "$TASK_ARG"
   ;;
 interactive)
   if [[ ! -s "$DB_FILE" ]]; then
