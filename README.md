@@ -128,18 +128,21 @@ Currently supported values for `-e`: `zellij` (default), `cursor`, `antigravity`
 
 ## Architecture
 
-### Supervisor Pattern
+### Activity Tracking
 
-`hap` uses a lightweight "Supervisor Pattern" for managing workspace lifecycles:
+`hap` uses passive tracking to determine if a workspace is "active" during bulk cleanup:
 
-1. **PID Lock:** A `.hap.pid` file is created in every workspace upon creation.
-2. **Activity Tracking:**
-   - **GUI Editors:** The script blocks (via `--wait`) until the editor closes.
-   - **Zellij:** The script waits for the Zellij process to exit.
-3. **Cleanup:**
-   - When the editor exits, the PID file is removed, marking the workspace as "inactive."
-   - Running `hap -c <project>` scans for workspaces without a valid PID or Zellij session and cleans them up.
-4. **Safety First:** Workspaces with uncommitted changes are always preserved, even during forced cleanup.
+1. **Zellij:** `hap` queries the Zellij daemon (`zellij list-sessions`) to check if a session named `project-task` is currently running.
+2. **GUI Editors:** A `.hap.gui` lock file is placed in the workspace. `hap` launches the editor in "Fire and Forget" mode (no blocking) and exits. The workspace remains "active" (safe from bulk cleanup) as long as this file exists.
+
+### Cleanup Logic
+
+1. **Bulk Cleanup (`hap -c project`):**
+   - Scans all workspaces.
+   - **Skips** any workspace with an active Zellij session or a `.hap.gui` file.
+   - Removes the rest.
+2. **Targeted Cleanup (`hap -c project task`):**
+   - **Forcefully** cleans the workspace, removing `.hap.gui` locks and git branches.
 
 ### Data Location
 

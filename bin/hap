@@ -7,13 +7,13 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.5.0"
+VERSION="0.5.1"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
 
-# PID lock file name (created inside workspaces)
-PID_LOCK_FILE=".hap.pid"
+# Lock file for GUI workspaces
+GUI_LOCK_FILE=".hap.gui"
 
 # --- COLORS ---
 BLUE='\033[0;34m'
@@ -35,11 +35,6 @@ zellij_session_exists() {
     zellij list-sessions 2>/dev/null | grep -q "^${session_name}$" && return 0
   fi
   return 1
-}
-
-pid_is_alive() {
-  local pid="$1"
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
 # --- CLEANUP FUNCTIONS ---
@@ -88,8 +83,8 @@ cleanup_workspace() {
     fi
   done
 
-  # Remove PID lock file first
-  rm -f "$ws_path/$PID_LOCK_FILE" 2>/dev/null || true
+  # Remove GUI lock file
+  rm -f "$ws_path/$GUI_LOCK_FILE" 2>/dev/null || true
 
   # Remove directory (with simple retry)
   local retry=0
@@ -145,8 +140,7 @@ cleanup_project_workspaces() {
   local delete_remote="$DELETE_REMOTE"
 
   if [[ -n "$task" ]]; then
-    # TARGETED CLEANUP: TRUST THE USER.
-    # No checks for PID/Session. If they typed the name, they want it gone.
+    # TARGETED CLEANUP: TRUST THE USER
     local ws_path="$workspaces_dir/$task"
     log_info "Cleaning workspace: $task"
     if cleanup_workspace "$ws_path" "$sources_dir" "$delete_local" "$delete_remote"; then
@@ -155,32 +149,30 @@ cleanup_project_workspaces() {
       log_warn "Failed to clean: $task (maybe uncommitted changes?)"
     fi
   else
-    # BULK CLEANUP: SAFETY IS PARAMOUNT.
-    # We must skip active workspaces.
+    # BULK CLEANUP: SAFETY IS PARAMOUNT
     log_info "Running bulk cleanup for inactive workspaces..."
     for ws_path in "$workspaces_dir"/*; do
       [[ ! -d "$ws_path" ]] && continue
       local ws_name=$(basename "$ws_path")
       [[ "$ws_name" == "main" ]] && continue
 
-      # CHECK ACTIVITY
-      local pid_file="$ws_path/$PID_LOCK_FILE"
       local is_active=0
 
-      if [[ -f "$pid_file" ]]; then
-        local pid=$(cat "$pid_file" 2>/dev/null || echo "")
-        if pid_is_alive "$pid"; then is_active=1; fi
+      # 1. Check for GUI Lock
+      if [[ -f "$ws_path/$GUI_LOCK_FILE" ]]; then
+        is_active=1
+      # 2. Check for Zellij Session
       else
         local session_name="$(basename "$project_root")-$ws_name"
         if zellij_session_exists "$session_name"; then is_active=1; fi
       fi
 
       if [[ $is_active -eq 1 ]]; then
-        log_info "Skipping active workspace: $ws_name"
+        # Silent skip or verbose? Silent is better for bulk to reduce noise.
+        # log_info "Skipping active workspace: $ws_name"
         continue
       fi
 
-      # It's inactive, safe to clean
       if cleanup_workspace "$ws_path" "$sources_dir" "$delete_local" "$delete_remote"; then
         log_succ "Cleaned: $ws_name"
       fi
@@ -229,6 +221,7 @@ launch_session() {
 
   case "$editor" in
   zellij)
+    # Prune Zellij session if it exists (Restart context)
     zellij delete-session "$session_name" 2>/dev/null || true
 
     local layout_file=""
@@ -256,11 +249,21 @@ launch_session() {
 
     unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
     log_info "Command: zellij ${args[*]}"
+
+    # Run as subprocess (Blocking, but Zellij takes over terminal)
     env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || true
     ;;
   cursor | antigravity)
-    log_info "Command: $editor --new-window --wait ."
-    "$editor" --new-window --wait . || true
+    # Create Lock File (Prevents Bulk Cleanup)
+    touch "$GUI_LOCK_FILE"
+
+    log_info "Opening $editor..."
+    # NO --wait. Fire and forget.
+    if [[ "$editor" == "cursor" ]]; then
+      cursor .
+    else
+      "$editor" .
+    fi
     ;;
   *)
     log_err "Unsupported editor: $editor"
@@ -342,15 +345,9 @@ create_workspace() {
     log_succ "Workspace ready"
   fi
 
-  # Create PID lock file (Needed for BULK cleanup safety)
-  echo "$$" >"$target_ws/$PID_LOCK_FILE"
-
   local original_dir=$(pwd)
   cd "$target_ws" || exit 1
   launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root" "$editor"
-
-  # Remove PID when editor exits (Mark as inactive for Bulk cleanup)
-  rm -f "$target_ws/$PID_LOCK_FILE"
   cd "$original_dir" || true
 }
 
