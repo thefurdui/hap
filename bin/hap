@@ -292,8 +292,8 @@ create_workspace() {
     mkdir -p "$target_ws"
 
     for repo in "$sources_dir"/*; do
+      local repo_name=$(basename "$repo")
       if [[ -d "$repo" && -d "$repo/.git" ]]; then
-        local repo_name=$(basename "$repo")
         local branch_name=""
 
         if [[ -n "$target_branch_prefix" ]]; then
@@ -339,8 +339,23 @@ create_workspace() {
         elif [[ -f "$target_ws/$repo_name/go.mod" ]]; then
           (cd "$target_ws/$repo_name" && go mod download &)
         fi
+      else
+        log_info "Linking source: $repo_name"
+        ln -sf "$repo" "$target_ws/$repo_name"
       fi
     done
+
+    # Global Shared Linking
+    if [[ -d "$project_root/shared" ]]; then
+      for item in "$project_root/shared"/*; do
+        local item_name=$(basename "$item")
+        if [[ ! -e "$target_ws/$item_name" ]]; then
+          log_info "Linking shared item: $item_name"
+          ln -sf "$item" "$target_ws/$item_name"
+        fi
+      done
+    fi
+
     wait
     log_succ "Workspace ready"
   fi
