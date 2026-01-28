@@ -48,15 +48,17 @@ cleanup_workspace() {
   [[ ! -d "$ws_path" ]] && return 0
 
   # Check for uncommitted changes
-  for repo in "$ws_path"/*; do
-    if [[ -e "$repo/.git" ]]; then
-      local status=$(git -C "$repo" status --porcelain 2>/dev/null || echo "")
-      if [[ -n "$status" ]]; then
-        log_warn "Preserving $(basename "$ws_path") — uncommitted changes"
-        return 1
+  if [[ "$delete_remote" != "true" ]]; then
+    for repo in "$ws_path"/*; do
+      if [[ -e "$repo/.git" ]]; then
+        local status=$(git -C "$repo" status --porcelain 2>/dev/null || echo "")
+        if [[ -n "$status" ]]; then
+          log_warn "Preserving $(basename "$ws_path") — uncommitted changes"
+          return 1
+        fi
       fi
-    fi
-  done
+    done
+  fi
 
   # Collect branches to delete if requested
   local branches_to_delete=()
