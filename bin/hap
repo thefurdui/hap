@@ -7,7 +7,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.5.1"
+VERSION="0.6.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -170,8 +170,6 @@ cleanup_project_workspaces() {
       fi
 
       if [[ $is_active -eq 1 ]]; then
-        # Silent skip or verbose? Silent is better for bulk to reduce noise.
-        # log_info "Skipping active workspace: $ws_name"
         continue
       fi
 
@@ -208,9 +206,8 @@ launch_session() {
   local project_name="$1"
   local workspace_path="$2"
   local session_name="$3"
-  local mode="$4"
-  local project_root="$5"
-  local editor="${6:-zellij}"
+  local project_root="$4"
+  local editor="${5:-zellij}"
 
   [[ ! -d "$workspace_path" ]] && {
     log_err "Path not found: $workspace_path"
@@ -219,7 +216,7 @@ launch_session() {
 
   cd "$workspace_path" || exit 1
 
-  log_info "Launching $project_name ($mode) with $editor..."
+  log_info "Launching $project_name with $editor..."
 
   case "$editor" in
   zellij)
@@ -229,20 +226,8 @@ launch_session() {
     local layout_file=""
     local project_config_dir="$project_root/config"
 
-    if [[ "$mode" == "lite" ]]; then
-      if [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
-        layout_file="$project_config_dir/hap-lite.kdl"
-      elif [[ -f "$project_config_dir/hap.kdl" ]]; then
-        log_warn "hap-lite.kdl missing, falling back to full layout"
-        layout_file="$project_config_dir/hap.kdl"
-      fi
-    else
-      if [[ -f "$project_config_dir/hap.kdl" ]]; then
-        layout_file="$project_config_dir/hap.kdl"
-      elif [[ -f "$project_config_dir/hap-lite.kdl" ]]; then
-        log_warn "hap.kdl missing, using lite layout"
-        layout_file="$project_config_dir/hap-lite.kdl"
-      fi
+    if [[ -f "$project_config_dir/hap.kdl" ]]; then
+      layout_file="$project_config_dir/hap.kdl"
     fi
 
     local args=()
@@ -251,6 +236,15 @@ launch_session() {
 
     unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
     log_info "Command: zellij ${args[*]}"
+
+    # HAP_UP controls whether server panes auto-run their start commands.
+    # Only affects initial session creation — after that, manage servers
+    # manually inside the running zellij session.
+    if [[ "$START_UP" == "true" ]]; then
+      export HAP_UP=1
+    else
+      unset HAP_UP
+    fi
 
     # Run as subprocess (Blocking, but Zellij takes over terminal)
     env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || true
@@ -290,7 +284,7 @@ create_workspace() {
   if [[ -d "$target_ws" ]]; then
     log_warn "Resuming existing workspace: $agent_task"
   else
-    log_info "Spawning Workspace: $agent_task (Base: $base_branch)"
+    log_info "Spawning workspace: $agent_task (base: $base_branch)"
     mkdir -p "$target_ws"
 
     for repo in "$sources_dir"/*; do
@@ -364,7 +358,7 @@ create_workspace() {
 
   local original_dir=$(pwd)
   cd "$target_ws" || exit 1
-  launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "lite" "$project_root" "$editor"
+  launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "$project_root" "$editor"
   cd "$original_dir" || true
 }
 
@@ -373,19 +367,19 @@ create_workspace() {
 usage() {
   cat <<EOF
 Usage: $APP_NAME [options]
-  -s <name> [path]    Save project
-  -w <name> <task>    Start workspace (Lite mode)
-  -c <name> [task]    Cleanup workspace(s) (Default: local only)
-  -D                  Force delete remote branch (Used with -c)
-  -y                  Confirm dangerous actions (Used with -D)
-  -m <lite|full>      Force mode
-  -e <editor>         Editor: zellij, cursor, antigravity (default: zellij)
-  -b <branch>         Base branch for workspace (default: dev)
-  -B <branch>         Target branch name (default: hap/<task>)
-  -d <name>           Delete project
-  -l                  List projects
-  -v                  Show version
-  (no args)           Open interactive selection
+  -p <project> [ws]    Open project (main driver if no workspace, workspace if given)
+  -s <name> [path]     Save project
+  -c <name> [task]     Cleanup workspace(s) (default: local only)
+  -u                   Start servers on session create (like docker compose up)
+  -D                   Force delete remote branch (used with -c)
+  -y                   Confirm dangerous actions (used with -D)
+  -e <editor>          Editor: zellij, cursor, antigravity (default: zellij)
+  -b <branch>          Base branch for workspace (default: dev)
+  -B <branch>          Target branch name (default: hap/<workspace>)
+  -d <name>            Delete project
+  -l                   List projects
+  -v                   Show version
+  (no args)            Open interactive selection
 EOF
 }
 
@@ -395,13 +389,13 @@ PROJECT_ARG=""
 TASK_ARG=""
 BRANCH_ARG="dev"
 TARGET_BRANCH_ARG=""
-MODE_ARG="default"
 EDITOR_ARG="zellij"
 ACTION="interactive"
 DELETE_REMOTE="false"
 CONFIRM_YES="false"
+START_UP="false"
 
-while getopts "s:d:p:w:b:B:m:e:c:Dy:lhv" opt; do
+while getopts "s:d:p:b:B:e:c:Duy:lhv" opt; do
   case $opt in
   s)
     ACTION="save"
@@ -419,26 +413,24 @@ while getopts "s:d:p:w:b:B:m:e:c:Dy:lhv" opt; do
     PROJECT_ARG="$OPTARG"
     ;;
   p)
-    ACTION="open"
     PROJECT_ARG="$OPTARG"
+    # Check if there's a workspace name after the project name
+    eval "NEXT_OPT=\${$OPTIND}"
+    if [[ -n "$NEXT_OPT" && "$NEXT_OPT" != -* ]]; then
+      ACTION="worktree"
+      TASK_ARG="$NEXT_OPT"
+      OPTIND=$((OPTIND + 1))
+    else
+      ACTION="open"
+    fi
     ;;
   b) BRANCH_ARG="$OPTARG" ;;
   B) TARGET_BRANCH_ARG="$OPTARG" ;;
-  m) MODE_ARG="$OPTARG" ;;
   e) EDITOR_ARG="$OPTARG" ;;
+  u) START_UP="true" ;;
   v)
     echo "hap v$VERSION"
     exit 0
-    ;;
-  w)
-    ACTION="worktree"
-    PROJECT_ARG="$OPTARG"
-    eval "TASK_ARG=\${$OPTIND}"
-    [[ -z "$TASK_ARG" || "$TASK_ARG" == -* ]] && {
-      log_err "Missing task name"
-      exit 1
-    }
-    OPTIND=$((OPTIND + 1))
     ;;
   c)
     ACTION="cleanup"
@@ -481,7 +473,7 @@ open)
     log_err "Project not found: $PROJECT_ARG"
     exit 1
   fi
-  launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$MODE_ARG" "$PATH_TO_ROOT" "$EDITOR_ARG"
+  launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$PATH_TO_ROOT" "$EDITOR_ARG"
   ;;
 worktree)
   PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
@@ -508,7 +500,7 @@ interactive)
   if [[ -n "$SELECTION" ]]; then
     NAME=$(echo "$SELECTION" | cut -d '|' -f 1)
     PATH_TO_ROOT=$(echo "$SELECTION" | cut -d '|' -f 2)
-    launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$MODE_ARG" "$PATH_TO_ROOT" "$EDITOR_ARG"
+    launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$PATH_TO_ROOT" "$EDITOR_ARG"
   fi
   ;;
 esac

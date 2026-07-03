@@ -1,30 +1,54 @@
 # hap
 
-**Hive Agent Pilot.** A blunt, efficient project manager for the modern ~~10x~~ Multi-threaded Engineer.
+CLI tool for running AI agents in parallel on different git branches. Manages git worktrees, zellij sessions, and server lifecycle across multiple workspaces.
 
-`hap` is a CLI tool designed for developers who want to use **AI Agents** locally in parallel on different git branches. It enforces a "Hive" directory structure to manage complex, multi-repository projects without context switching.
+## The Problem
 
-## Why?
+You're working on a feature. An agent is running on it. It takes 20 minutes. You're sitting there. That's 20 minutes gone.
 
-Most project managers just `cd` into a folder. `hap` manages **parallel universes**.
+`hap` lets you spin up isolated workspaces — each with its own branch, its own agent, its own terminal session — so you can work on three things at once while agents do the heavy lifting.
 
-1.  **The Hive Structure:** Separates `sources` (git history) from `workspaces` (active state).
-2.  **Workspace Mode:** Instantly spawn a temporary, isolated workspace (`hap -w`) for an AI agent or a quick hotfix.
-3.  **Explicit Cleanup:** Workspaces persist after you close the editor. Use the dedicated cleanup command to remove them and their branches when done.
-4.  **Dual Modes:** Support for Heavy layouts (Servers/DBs) and Lite layouts (Editor only).
+## Two Ways to Use It
 
-## Installation
+### Pets (Permanent Workspaces)
 
-### Prerequisites
+You create a few workspaces and keep them around. Name them by domain, by priority, whatever works for you.
 
-- `bash` (4.0+)
-- `zellij` (default editor)
-- `fzf`
-- `git`
-- `cursor` or `antigravity` (optional, for `-e cursor` or `-e antigravity` support)
-- `pnpm` (optional, for auto-install)
+```
+workspaces/
+├── main/          ← your daily driver, servers running here
+├── alpha/         ← user-facing features
+├── beta/          ← backend / infra work
+└── gamma/         ← experiments, spikes
+```
 
-### Build
+When you finish a feature in `alpha`, you merge the branch, check out a new one, and reuse the workspace. The workspace is yours — you maintain it like you maintain your desk.
+
+**Good for:** solo devs, small teams, startups. You know your workspaces, you know what's in each one.
+
+### Cattle (Ephemeral Workspaces)
+
+One workspace per ticket. `PROJ-1234` gets a workspace, a branch, an agent. When the PR is merged, you clean it up. No attachment.
+
+```
+workspaces/
+├── main/
+├── PROJ-1234/     ← created for the ticket, deleted after merge
+├── PROJ-1237/
+└── PROJ-1241/
+```
+
+`hap` handles the creation and cleanup. You don't think about the workspace — you think about the ticket.
+
+**Good for:** teams, corporations, anyone who works off a backlog. Workspaces are disposable.
+
+Both approaches use the exact same commands. The only difference is whether you run `hap -c` after merging.
+
+## Install
+
+**Requires:** `bash` 4.0+, `zellij`, `fzf`, `git`
+
+**Optional:** `lazygit`
 
 ```bash
 git clone https://github.com/thefurdui/hap.git
@@ -32,123 +56,129 @@ cd hap
 make install
 ```
 
+## Setup
+
+### 1. Create the project structure
+
+```
+~/projects/your-project/
+├── config/         ← put hap.kdl here (copy from templates/)
+├── sources/        ← your git repos (the source of truth)
+├── workspaces/     ← managed by hap
+│   └── main/       ← your main worktree (create this yourself)
+└── shared/         ← (optional) files symlinked into every workspace
+```
+
+- **`sources/`** — clone your repos here. These are the bare repos that worktrees branch from.
+- **`workspaces/main/`** — your primary worktree. Create it manually with `git worktree add` from each repo in `sources/`.
+- **`config/hap.kdl`** — copy `templates/hap.kdl` and edit the `cwd` paths and server start commands to match your repos.
+- **`shared/`** — put `.env` files, local certs, or anything not in git here. Mirror the repo directory structure. Files get symlinked into every new workspace automatically.
+
+### 2. Register the project
+
+```bash
+cd ~/projects/your-project
+hap -s your-project .
+```
+
 ## Usage
 
-### 1. Setup your Project (The Hive)
-
-`hap` requires a specific directory structure to manage parallel contexts effectively.
-
-1.  **Create the Skeleton:**
-
-    ```text
-    ~/projects/your-project/
-    ├── config/             <-- You MUST put hap.kdl and hap-lite.kdl here
-    ├── sources/            <-- Bare or Detached Git Repos (The "Truth")
-    ├── workspaces/         <-- Managed by hap (The "Action")
-    └── shared/             <-- (Optional) Persistent state linked to workspaces
-    ```
-
-2.  **Shared State (Optional):**
-    If you have files that are NOT in git (like `.env` files, local certificates, or IDE configs) but need them in every ephemeral workspace:
-    - Create a folder in `shared/` named exactly like the repo in `sources/`.
-    - Any file placed in `shared/repo-name/` will be automatically symlinked into the workspace when created.
-
-3.  **Configure the Layouts:**
-    Copy the files from `templates/` into your `config/` folder and adapt them:
-    - **`hap.kdl` (The Heavy Lifter):** Edit the "Systems" tab. Change the `cwd` paths to match your repo names in `sources/` and update the `args` to run your actual servers (e.g., `go run main.go`, `pnpm dev`).
-    - **`hap-lite.kdl` (The Agent):** Update the agent pane command if you use something other than `gemini` (e.g., `claude`, `aider`).
-
-4.  **Register the Project:**
-    ```bash
-    cd ~/projects/your-project
-    hap -s your-project .
-    ```
-
-### 2. The Workflow
-
-**Daily Driver (Full Mode):**
-Opens your project with the servers defined in `hap.kdl` running automatically.
-
-```bash
-hap                     # Interactive list
-hap -p your-project     # Open directly
+```
+hap [options]
+  -p <project> [workspace]   Open project or workspace
+  -s <name> [path]           Register a project
+  -c <name> [workspace]      Cleanup workspace(s)
+  -u                         Auto-start servers on session create
+  -D                         Delete remote branches too (with -c)
+  -y                         Skip confirmation prompts (with -D)
+  -e <editor>                zellij (default), cursor, antigravity
+  -b <branch>                Base branch for new workspaces (default: dev)
+  -B <branch>                Override branch name (default: hap/<workspace>)
+  -d <name>                  Unregister a project
+  -l                         List registered projects
+  -v                         Version
+  (no args)                  Interactive project picker (fzf)
 ```
 
-**Agent / Parallel Mode:**
-You are working in Main. You need to fix a bug on the `backend` without stopping the servers or changing branches.
+### Open your project (main driver)
 
 ```bash
-hap -w your-project backend-fix
+hap                          # interactive picker
+hap -p myproject             # direct, servers tab ready but idle
+hap -p myproject -u          # servers auto-start on session create
 ```
 
-- Creates `workspaces/backend-fix`.
-- Creates fresh git worktrees from `sources/`.
-    - Default branch: `hap/backend-fix/repo-name`
-- Pushes the new branch to `origin` immediately.
-- Installs dependencies (pnpm/go) in the background.
-- Opens Zellij using `hap-lite.kdl` (No servers, just code + agent).
-- **On Exit:** The workspace remains.
-
-**Cleanup:**
-When you are done with a task, use the cleanup command.
+### Open a workspace
 
 ```bash
-hap -c your-project backend-fix      # Clean local workspace & branch
-hap -c your-project backend-fix -D   # Clean local + DELETE REMOTE branch (Prompts confirmation)
-hap -c your-project                  # Bulk clean all inactive, clean workspaces
+hap -p myproject bugfix      # opens workspace "bugfix", creates it if it doesn't exist
+hap -p myproject bugfix -u   # same, but servers auto-start
 ```
 
-**Target Branch Control:**
-You can specify a target branch name instead of the default `hap/` prefix.
+What happens when a workspace is created:
+
+1. Creates `workspaces/bugfix/`
+2. Adds git worktrees from every repo in `sources/` (branch: `hap/bugfix`)
+3. Pushes the branch to origin
+4. Installs dependencies in the background (pnpm/go)
+5. Symlinks shared state from `shared/`
+6. Opens a zellij session
+
+If the workspace already exists, it just opens it.
+
+### Servers and the `-u` flag
+
+Every session gets a "servers" tab with panes for each service. The `-u` flag controls what happens **when the session is first created**:
+
+|              | Without `-u`                                | With `-u`                                         |
+| ------------ | ------------------------------------------- | ------------------------------------------------- |
+| Server panes | Open to a ready shell                       | Auto-run your start command                       |
+| Use case     | Workspaces where you just need code + agent | Main driver where you want servers up immediately |
+
+**After the session is created, `-u` doesn't matter anymore.** You're inside a living zellij session. You manage servers manually from there:
+
+- **Stop a server:** go to the servers tab, Ctrl+C
+- **Start a server:** go to the servers tab, type the command (or up-arrow for history)
+- **Switch context:** you have multiple zellij sessions open in different terminals. Just switch terminals.
+
+The whole point: every session already has server panes with the right `cwd` set. You never need to close zellij, reopen it, or re-run `hap` just to toggle servers. The panes are there, the shells are there, you just Ctrl+C / type the command.
+
+### Cleanup
 
 ```bash
-hap -w your-project login-feature -B feat/login
+hap -c myproject bugfix        # remove workspace + local branch
+hap -c myproject bugfix -D     # also delete remote branch (asks confirmation)
+hap -c myproject bugfix -D -y  # skip confirmation
+hap -c myproject               # bulk cleanup: removes all inactive workspaces
 ```
-- Creates `workspaces/login-feature`.
-- Checks out branch `feat/login/repo-name`.
 
-**Manual Mode Selection:**
-Open the Main workspace, but skip the heavy server startup (uses `hap-lite.kdl`).
+Bulk cleanup skips workspaces that have an active zellij session or a `.hap.gui` lock file (from GUI editors).
+
+### Editors
 
 ```bash
-hap -m lite
+hap -p myproject -e cursor
+hap -p myproject bugfix -e antigravity
 ```
 
-**Custom Editor:**
-By default, `hap` uses Zellij. You can switch to a GUI editor for a more traditional IDE experience.
+GUI editors (`cursor`, `antigravity`) use fire-and-forget mode: `hap` creates a `.hap.gui` lock file and exits. The lock protects the workspace from bulk cleanup. Targeted cleanup (`-c project task`) removes the lock.
 
-```bash
-hap -p your-project -e cursor
-hap -w your-project fix-bug -e cursor
-hap -p your-project -e antigravity
-hap -w your-project fix-bug -e antigravity
-```
+## Layout
 
-Currently supported values for `-e`: `zellij` (default), `cursor`, `antigravity`.
+There's one layout file: `hap.kdl`. It has two tabs:
 
-## Architecture
+1. **code** — your editors + agent pane
+2. **servers** — server processes, lazygit, and spare shells
 
-### Activity Tracking
+Edit `config/hap.kdl` to match your project. The template uses `frontend/` and `backend/` as example `cwd` paths — change them to your actual repo names from `sources/`.
 
-`hap` uses passive tracking to determine if a workspace is "active" during bulk cleanup:
+The server panes check the `HAP_UP` env var to decide whether to auto-run. Replace the placeholder `echo` commands with your real start commands. See [templates/hap.kdl](templates/hap.kdl) for the pattern.
 
-1. **Zellij:** `hap` queries the Zellij daemon (`zellij list-sessions`) to check if a session named `project-task` is currently running.
-2. **GUI Editors:** A `.hap.gui` lock file is placed in the workspace. `hap` launches the editor in "Fire and Forget" mode (no blocking) and exits. The workspace remains "active" (safe from bulk cleanup) as long as this file exists.
+## Data
 
-### Cleanup Logic
+All hap data lives in `~/.local/share/hap/`:
 
-1. **Bulk Cleanup (`hap -c project`):**
-   - Scans all workspaces.
-   - **Skips** any workspace with an active Zellij session or a `.hap.gui` file.
-   - Removes the rest.
-2. **Targeted Cleanup (`hap -c project task`):**
-   - **Forcefully** cleans the workspace, removing `.hap.gui` locks and git branches.
-
-### Data Location
-
-All `hap` data is stored in `~/.local/share/hap/`:
-
-- `projects.csv` — Registered projects
+- `projects.csv` — registered projects (name|path)
 
 ## License
 
