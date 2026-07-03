@@ -50,6 +50,14 @@ Both approaches use the exact same commands. The only difference is whether you 
 
 **Optional:** `lazygit`
 
+**One-line Install:**
+
+```bash
+curl -sL https://raw.githubusercontent.com/thefurdui/hap/refs/heads/main/install.sh | bash
+```
+
+**Manual Install:**
+
 ```bash
 git clone https://github.com/thefurdui/hap.git
 cd hap
