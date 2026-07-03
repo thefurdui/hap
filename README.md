@@ -64,48 +64,106 @@ cd hap
 make install
 ```
 
-## Setup
-
-### 1. Create the project structure
-
-```
-~/projects/your-project/
-├── config/         ← put hap.kdl here (copy from templates/)
-├── sources/        ← your git repos (the source of truth)
-├── workspaces/     ← managed by hap
-│   └── main/       ← your main worktree (create this yourself)
-└── shared/         ← (optional) files symlinked into every workspace
-```
-
-- **`sources/`** — clone your repos here. These are the bare repos that worktrees branch from.
-- **`workspaces/main/`** — your primary worktree. Create it manually with `git worktree add` from each repo in `sources/`.
-- **`config/hap.kdl`** — copy `templates/hap.kdl` and edit the `cwd` paths and server start commands to match your repos.
-- **`shared/`** — put `.env` files, local certs, or anything not in git here. Mirror the repo directory structure. Files get symlinked into every new workspace automatically.
-
-### 2. Register the project
+## Quick Start
 
 ```bash
 cd ~/projects/your-project
-hap -s your-project .
+hap init
+```
+
+That's it. `hap init` detects your repos, scaffolds the directory structure, creates worktrees, copies the layout template, and registers the project. You're ready to go.
+
+Then edit `config/hap.kdl` to set your server start commands, and:
+
+```bash
+hap -p your-project -u
+```
+
+## Setup
+
+### `hap init`
+
+Run `hap init` inside your project directory. It handles two scenarios:
+
+**Single repo** (`.git` at root):
+```bash
+cd ~/projects/myapp    # has .git here
+hap init
+```
+
+**Multiple repos** (subdirectories with `.git`):
+```bash
+cd ~/projects/myapp    # has frontend/, backend/ with .git inside each
+hap init
+```
+
+You can pass a custom project name: `hap init my-custom-name`. Defaults to the directory name.
+
+**What it does:**
+
+1. Scans for git repos (level 0: root `.git`, level 1: subdirs with `.git`)
+2. Creates `sources/`, `workspaces/main/`, `config/`, `shared/`
+3. Moves each repo into `sources/<name>/`
+4. Detaches HEAD in each source repo, creates a worktree in `workspaces/main/<name>/` on the original branch
+5. Moves any leftover files/dirs into `misc/`
+6. Copies `hap.kdl` template into `config/`
+7. Registers the project in `~/.local/share/hap/projects.csv`
+
+**Result:**
+```
+your-project/
+├── config/
+│   └── hap.kdl         ← edit this: cwd paths, server commands
+├── sources/
+│   ├── frontend/       ← detached HEAD, used for worktree ops
+│   └── backend/
+├── workspaces/
+│   └── main/
+│       ├── frontend/   ← git worktree (your working copy)
+│       └── backend/
+├── shared/             ← put .env files, certs, etc. here
+└── misc/               ← leftover non-repo files (if any)
+```
+
+### Shared State
+
+If you have files that aren't in git but need to exist in every workspace (`.env`, local certs, IDE configs):
+
+1. Create a folder in `shared/` named after the repo: `shared/backend/`
+2. Mirror the file's relative path: `shared/backend/.env`
+3. `hap` will symlink these into every new workspace automatically
+
+### Manual Registration
+
+If you already have the directory structure set up (or want to register a project without scaffolding):
+
+```bash
+hap -s your-project /path/to/project
 ```
 
 ## Usage
 
 ```
+hap <command> [args]
 hap [options]
-  -p <project> [workspace]   Open project or workspace
-  -s <name> [path]           Register a project
-  -c <name> [workspace]      Cleanup workspace(s)
-  -u                         Auto-start servers on session create
-  -D                         Delete remote branches too (with -c)
-  -y                         Skip confirmation prompts (with -D)
-  -e <editor>                zellij (default), cursor, antigravity
-  -b <branch>                Base branch for new workspaces (default: dev)
-  -B <branch>                Override branch name (default: hap/<workspace>)
-  -d <name>                  Unregister a project
-  -l                         List registered projects
-  -v                         Version
-  (no args)                  Interactive project picker (fzf)
+
+Commands:
+  init [name]              Scaffold project from current directory
+
+Options:
+  -p <project> [workspace] Open project or workspace
+  -s <name> [path]         Register a project manually
+  -c <name> [workspace]    Cleanup workspace(s)
+  -u                       Auto-start servers on session create
+  -D                       Delete remote branches too (with -c)
+  -y                       Skip confirmation prompts (with -D)
+  -e <editor>              zellij (default), cursor, antigravity
+  -b <branch>              Base branch for new workspaces (default: dev)
+  -B <branch>              Override branch name (default: hap/<workspace>)
+  -d <name>                Unregister a project
+  -l                       List registered projects
+  -v                       Version
+  (no args)                Interactive project picker (fzf)
 ```
 
 ### Open your project (main driver)
@@ -138,10 +196,10 @@ If the workspace already exists, it just opens it.
 
 Every session gets a "servers" tab with panes for each service. The `-u` flag controls what happens **when the session is first created**:
 
-|              | Without `-u`                                | With `-u`                                         |
-| ------------ | ------------------------------------------- | ------------------------------------------------- |
-| Server panes | Open to a ready shell                       | Auto-run your start command                       |
-| Use case     | Workspaces where you just need code + agent | Main driver where you want servers up immediately |
+| | Without `-u` | With `-u` |
+|---|---|---|
+| Server panes | Open to a ready shell | Auto-run your start command |
+| Use case | Workspaces where you just need code + agent | Main driver where you want servers up immediately |
 
 **After the session is created, `-u` doesn't matter anymore.** You're inside a living zellij session. You manage servers manually from there:
 
@@ -187,6 +245,7 @@ The server panes check the `HAP_UP` env var to decide whether to auto-run. Repla
 All hap data lives in `~/.local/share/hap/`:
 
 - `projects.csv` — registered projects (name|path)
+- `templates/hap.kdl` — layout template (installed by `make install`)
 
 ## License
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# hap - Hive Agent Pilot
+
+# hap
 # https://github.com/thefurdui/hap
 # License: MIT
 
@@ -7,7 +8,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.6.0"
+VERSION="0.7.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -362,13 +363,185 @@ create_workspace() {
   cd "$original_dir" || true
 }
 
+# --- INIT ---
+
+hap_init() {
+  local project_name="${1:-$(basename "$(pwd)")}"
+  local project_root="$(pwd)"
+
+  # Guard: already initialized
+  if [[ -d "$project_root/sources" ]]; then
+    log_err "Already initialized (sources/ directory exists)"
+    exit 1
+  fi
+
+  # Detect git repos
+  local repos=()
+  local is_root_repo=false
+
+  # Level 0: is the current directory itself a git repo?
+  if [[ -d "$project_root/.git" ]]; then
+    is_root_repo=true
+    repos+=("$project_name")
+    log_info "Detected root-level repo: $project_name"
+  else
+    # Level 1: immediate subdirectories with .git
+    for dir in "$project_root"/*/; do
+      [[ ! -d "$dir" ]] && continue
+      if [[ -d "$dir/.git" ]]; then
+        local name
+        name=$(basename "$dir")
+        repos+=("$name")
+        log_info "Detected repo: $name"
+      fi
+    done
+  fi
+
+  if [[ ${#repos[@]} -eq 0 ]]; then
+    log_err "No git repositories found"
+    log_err "Expected .git in current directory, or subdirectories containing .git"
+    exit 1
+  fi
+
+  log_info "Initializing hap project: $project_name (${#repos[@]} repo(s))"
+
+  # Create scaffold
+  mkdir -p "$project_root/sources"
+  mkdir -p "$project_root/workspaces/main"
+  mkdir -p "$project_root/config"
+  mkdir -p "$project_root/shared"
+
+  if [[ "$is_root_repo" == true ]]; then
+    # --- Single repo at root ---
+    # Move everything into sources/<project_name>, then create a worktree back out.
+    local staging="$project_root/.hap-init-staging"
+    mkdir -p "$staging"
+
+    # Move all contents to staging (visible + dotfiles, skip scaffold dirs)
+    for item in "$project_root"/* "$project_root"/.[!.]*; do
+      [[ ! -e "$item" ]] && continue
+      local item_name
+      item_name=$(basename "$item")
+      case "$item_name" in
+      sources | workspaces | config | shared | .hap-init-staging) continue ;;
+      esac
+      mv "$item" "$staging/" 2>/dev/null || true
+    done
+
+    # Staging becomes the source repo
+    mv "$staging" "$project_root/sources/$project_name"
+
+    # Detach HEAD in source to free the branch name for the worktree
+    local current_branch
+    current_branch=$(git -C "$project_root/sources/$project_name" symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+    if [[ -n "$current_branch" ]]; then
+      git -C "$project_root/sources/$project_name" checkout --detach 2>/dev/null
+      git -C "$project_root/sources/$project_name" worktree add \
+        "$project_root/workspaces/main/$project_name" "$current_branch" 2>/dev/null
+      log_succ "Worktree: main/$project_name ($current_branch)"
+    else
+      log_warn "Could not determine branch for $project_name, skipping worktree"
+    fi
+  else
+    # --- Multi-repo ---
+    # Move each repo dir to sources/, create worktrees, collect leftovers.
+    local misc_items=()
+
+    for item in "$project_root"/*; do
+      [[ ! -e "$item" ]] && continue
+      local item_name
+      item_name=$(basename "$item")
+
+      # Skip scaffold dirs
+      case "$item_name" in
+      sources | workspaces | config | shared | misc) continue ;;
+      esac
+
+      if [[ -d "$item/.git" ]]; then
+        # Git repo — move to sources
+        mv "$item" "$project_root/sources/$item_name"
+
+        local current_branch
+        current_branch=$(git -C "$project_root/sources/$item_name" symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+        if [[ -n "$current_branch" ]]; then
+          git -C "$project_root/sources/$item_name" checkout --detach 2>/dev/null
+          git -C "$project_root/sources/$item_name" worktree add \
+            "$project_root/workspaces/main/$item_name" "$current_branch" 2>/dev/null
+          log_succ "Worktree: main/$item_name ($current_branch)"
+        else
+          log_warn "Could not determine branch for $item_name, skipping worktree"
+        fi
+      else
+        misc_items+=("$item")
+      fi
+    done
+
+    # Collect dotfiles as misc too
+    for item in "$project_root"/.[!.]*; do
+      [[ ! -e "$item" ]] && continue
+      misc_items+=("$item")
+    done
+
+    # Move leftovers to misc/
+    if [[ ${#misc_items[@]} -gt 0 ]]; then
+      mkdir -p "$project_root/misc"
+      for item in "${misc_items[@]}"; do
+        mv "$item" "$project_root/misc/" 2>/dev/null || true
+      done
+      log_info "Moved ${#misc_items[@]} non-repo item(s) to misc/"
+    fi
+  fi
+
+  # Copy layout template to config/
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+  local hap_root
+  hap_root="$(dirname "$script_dir")"
+  local template="$hap_root/templates/hap.kdl"
+
+  if [[ -f "$template" ]]; then
+    cp "$template" "$project_root/config/hap.kdl"
+    log_succ "Copied layout template to config/hap.kdl"
+  elif [[ -f "$DATA_DIR/templates/hap.kdl" ]]; then
+    cp "$DATA_DIR/templates/hap.kdl" "$project_root/config/hap.kdl"
+    log_succ "Copied layout template to config/hap.kdl"
+  else
+    log_warn "Layout template not found — copy templates/hap.kdl to config/hap.kdl manually"
+  fi
+
+  # Register project (upsert)
+  mkdir -p "$DATA_DIR"
+  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE"
+  if grep -q "^${project_name}|" "$DB_FILE" 2>/dev/null; then
+    local tmp_db
+    tmp_db=$(mktemp)
+    grep -v "^${project_name}|" "$DB_FILE" >"$tmp_db"
+    mv "$tmp_db" "$DB_FILE"
+  fi
+  echo "${project_name}|${project_root}" >>"$DB_FILE"
+
+  echo ""
+  log_succ "Project initialized: $project_name"
+  log_info "Next steps:"
+  log_info "  1. Edit config/hap.kdl — set cwd paths and server commands"
+  log_info "  2. Run: hap -p $project_name"
+}
+
 # --- CLI ---
 
 usage() {
   cat <<EOF
-Usage: $APP_NAME [options]
+Usage: $APP_NAME <command> [args]
+       $APP_NAME [options]
+
+Commands:
+  init [name]          Scaffold project structure from current directory
+
+Options:
   -p <project> [ws]    Open project (main driver if no workspace, workspace if given)
-  -s <name> [path]     Save project
+  -s <name> [path]     Register a project manually
   -c <name> [task]     Cleanup workspace(s) (default: local only)
   -u                   Start servers on session create (like docker compose up)
   -D                   Force delete remote branch (used with -c)
@@ -376,7 +549,7 @@ Usage: $APP_NAME [options]
   -e <editor>          Editor: zellij, cursor, antigravity (default: zellij)
   -b <branch>          Base branch for workspace (default: dev)
   -B <branch>          Target branch name (default: hap/<workspace>)
-  -d <name>            Delete project
+  -d <name>            Unregister a project
   -l                   List projects
   -v                   Show version
   (no args)            Open interactive selection
@@ -384,6 +557,15 @@ EOF
 }
 
 # --- MAIN ---
+
+# Subcommand dispatch (verb-style commands, checked before getopts)
+case "${1:-}" in
+init)
+  shift
+  hap_init "$@"
+  exit $?
+  ;;
+esac
 
 PROJECT_ARG=""
 TASK_ARG=""
@@ -493,10 +675,10 @@ cleanup)
   ;;
 interactive)
   if [[ ! -s "$DB_FILE" ]]; then
-    log_warn "No projects found. Use 'hap -s <name> <path>' to save one."
+    log_warn "No projects found. Use 'hap init' in your project directory."
     exit 0
   fi
-  SELECTION=$(fzf --height=40% --layout=reverse --border --prompt="Select Hive > " --delimiter="|" --with-nth=1,2 <"$DB_FILE")
+  SELECTION=$(fzf --height=40% --layout=reverse --border --prompt="Select project > " --delimiter="|" --with-nth=1,2 <"$DB_FILE")
   if [[ -n "$SELECTION" ]]; then
     NAME=$(echo "$SELECTION" | cut -d '|' -f 1)
     PATH_TO_ROOT=$(echo "$SELECTION" | cut -d '|' -f 2)
