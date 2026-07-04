@@ -201,6 +201,11 @@ ensure_setup() {
   fi
 }
 
+ensure_db() {
+  mkdir -p "$DATA_DIR"
+  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE" || true
+}
+
 # --- SESSION LAUNCH ---
 
 launch_session() {
@@ -526,163 +531,215 @@ hap_init() {
   log_succ "Project initialized: $project_name"
   log_info "Next steps:"
   log_info "  1. Edit config/hap.kdl — set cwd paths and server commands"
-  log_info "  2. Run: hap -p $project_name"
+  log_info "  2. Run: hap open $project_name"
+}
+
+# --- COMMANDS ---
+
+hap_open() {
+  local project="" workspace="" editor="zellij" base_branch="dev" target_branch=""
+  START_UP="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -u) START_UP="true"; shift ;;
+    -e) editor="${2:?'-e requires an editor name'}"; shift 2 ;;
+    -b) base_branch="${2:?'-b requires a branch name'}"; shift 2 ;;
+    -B) target_branch="${2:?'-B requires a branch name'}"; shift 2 ;;
+    -*)
+      log_err "Unknown option: $1"
+      log_err "Usage: hap open <project> [workspace] [-u] [-e editor] [-b branch] [-B branch]"
+      exit 1
+      ;;
+    *)
+      if [[ -z "$project" ]]; then
+        project="$1"
+      elif [[ -z "$workspace" ]]; then
+        workspace="$1"
+      else
+        log_err "Unexpected argument: $1"
+        exit 1
+      fi
+      shift
+      ;;
+    esac
+  done
+
+  if [[ -z "$project" ]]; then
+    log_err "Project name required"
+    log_err "Usage: hap open <project> [workspace] [-u] [-e editor]"
+    exit 1
+  fi
+
+  ensure_setup "$editor"
+
+  local path_to_root
+  path_to_root=$(grep "^${project}|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  if [[ -z "$path_to_root" ]]; then
+    log_err "Project not found: $project"
+    exit 1
+  fi
+
+  if [[ -n "$workspace" ]]; then
+    create_workspace "$path_to_root" "$project" "$workspace" "$base_branch" "$editor" "$target_branch"
+  else
+    launch_session "$project" "$path_to_root/workspaces/main" "$project-main" "$path_to_root" "$editor"
+  fi
+}
+
+hap_add() {
+  local name="${1:?'Project name required. Usage: hap add <name> [path]'}"
+  local path="${2:-.}"
+
+  ensure_db
+
+  local full_path
+  [[ "$path" == "." ]] && full_path="$(pwd)" || full_path="$(cd "$path" && pwd)"
+
+  # Upsert: remove old entry if exists
+  if grep -q "^${name}|" "$DB_FILE" 2>/dev/null; then
+    local tmp_db
+    tmp_db=$(mktemp)
+    grep -v "^${name}|" "$DB_FILE" >"$tmp_db"
+    mv "$tmp_db" "$DB_FILE"
+  fi
+
+  echo "$name|$full_path" >>"$DB_FILE"
+  log_succ "Registered: $name → $full_path"
+}
+
+hap_remove() {
+  local name="${1:?'Project name required. Usage: hap remove <name>'}"
+
+  ensure_db
+
+  if ! grep -q "^${name}|" "$DB_FILE" 2>/dev/null; then
+    log_err "Project not found: $name"
+    exit 1
+  fi
+
+  local tmp_db
+  tmp_db=$(mktemp)
+  grep -v "^${name}|" "$DB_FILE" >"$tmp_db"
+  mv "$tmp_db" "$DB_FILE"
+  log_succ "Removed: $name"
+}
+
+hap_clean() {
+  local project="" workspace=""
+  DELETE_REMOTE="false"
+  CONFIRM_YES="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -D) DELETE_REMOTE="true"; shift ;;
+    -y) CONFIRM_YES="true"; shift ;;
+    -*)
+      log_err "Unknown option: $1"
+      log_err "Usage: hap clean <project> [workspace] [-D] [-y]"
+      exit 1
+      ;;
+    *)
+      if [[ -z "$project" ]]; then
+        project="$1"
+      elif [[ -z "$workspace" ]]; then
+        workspace="$1"
+      else
+        log_err "Unexpected argument: $1"
+        exit 1
+      fi
+      shift
+      ;;
+    esac
+  done
+
+  if [[ -z "$project" ]]; then
+    log_err "Project name required"
+    log_err "Usage: hap clean <project> [workspace] [-D] [-y]"
+    exit 1
+  fi
+
+  ensure_db
+
+  local path_to_root
+  path_to_root=$(grep "^${project}|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  if [[ -z "$path_to_root" ]]; then
+    log_err "Project not found: $project"
+    exit 1
+  fi
+
+  cleanup_project_workspaces "$path_to_root" "$workspace"
+}
+
+hap_list() {
+  ensure_db
+  if [[ ! -s "$DB_FILE" ]]; then
+    log_warn "No projects registered. Use 'hap init' to get started."
+    exit 0
+  fi
+  column -t -s "|" "$DB_FILE"
+}
+
+hap_interactive() {
+  ensure_setup "zellij"
+  START_UP="false"
+
+  if [[ ! -s "$DB_FILE" ]]; then
+    log_warn "No projects found. Use 'hap init' in your project directory."
+    exit 0
+  fi
+
+  local selection
+  selection=$(fzf --height=40% --layout=reverse --border --prompt="Select project > " --delimiter="|" --with-nth=1,2 <"$DB_FILE")
+  if [[ -n "$selection" ]]; then
+    local name path_to_root
+    name=$(echo "$selection" | cut -d '|' -f 1)
+    path_to_root=$(echo "$selection" | cut -d '|' -f 2)
+    launch_session "$name" "$path_to_root/workspaces/main" "$name-main" "$path_to_root" "zellij"
+  fi
 }
 
 # --- CLI ---
 
 usage() {
   cat <<EOF
-Usage: $APP_NAME <command> [args]
-       $APP_NAME [options]
+Usage: hap <command> [args] [flags]
 
 Commands:
-  init [name]          Scaffold project structure from current directory
+  init [name]                    Scaffold project from current directory
+  open <project> [workspace]     Open project or workspace
+  add <name> [path]              Register a project
+  remove <name>                  Unregister a project
+  clean <project> [workspace]    Cleanup workspace(s)
+  list                           List registered projects
+  help                           Show this help
+  version                        Show version
 
-Options:
-  -p <project> [ws]    Open project (main driver if no workspace, workspace if given)
-  -s <name> [path]     Register a project manually
-  -c <name> [task]     Cleanup workspace(s) (default: local only)
-  -u                   Start servers on session create (like docker compose up)
-  -D                   Force delete remote branch (used with -c)
-  -y                   Confirm dangerous actions (used with -D)
-  -e <editor>          Editor: zellij, cursor, antigravity (default: zellij)
-  -b <branch>          Base branch for workspace (default: dev)
-  -B <branch>          Target branch name (default: hap/<workspace>)
-  -d <name>            Unregister a project
-  -l                   List projects
-  -v                   Show version
-  (no args)            Open interactive selection
+Flags for 'open':
+  -u              Auto-start servers (like docker compose up)
+  -e <editor>     Editor: zellij (default), cursor, antigravity
+  -b <branch>     Base branch for new workspace (default: dev)
+  -B <branch>     Target branch name (default: hap/<workspace>)
+
+Flags for 'clean':
+  -D              Also delete remote branches
+  -y              Skip confirmation (with -D)
+
+Run 'hap' with no arguments for interactive project selection.
 EOF
 }
 
 # --- MAIN ---
 
-# Subcommand dispatch (verb-style commands, checked before getopts)
 case "${1:-}" in
-init)
-  shift
-  hap_init "$@"
-  exit $?
-  ;;
-esac
-
-PROJECT_ARG=""
-TASK_ARG=""
-BRANCH_ARG="dev"
-TARGET_BRANCH_ARG=""
-EDITOR_ARG="zellij"
-ACTION="interactive"
-DELETE_REMOTE="false"
-CONFIRM_YES="false"
-START_UP="false"
-
-while getopts "s:d:p:b:B:e:c:Duy:lhv" opt; do
-  case $opt in
-  s)
-    ACTION="save"
-    PROJECT_ARG="$OPTARG"
-    eval "NEXT_OPT=\${$OPTIND}"
-    if [[ -n "$NEXT_OPT" && "$NEXT_OPT" != -* ]]; then
-      PROJECT_PATH="$NEXT_OPT"
-      OPTIND=$((OPTIND + 1))
-    else
-      PROJECT_PATH="."
-    fi
-    ;;
-  d)
-    ACTION="delete"
-    PROJECT_ARG="$OPTARG"
-    ;;
-  p)
-    PROJECT_ARG="$OPTARG"
-    # Check if there's a workspace name after the project name
-    eval "NEXT_OPT=\${$OPTIND}"
-    if [[ -n "$NEXT_OPT" && "$NEXT_OPT" != -* ]]; then
-      ACTION="worktree"
-      TASK_ARG="$NEXT_OPT"
-      OPTIND=$((OPTIND + 1))
-    else
-      ACTION="open"
-    fi
-    ;;
-  b) BRANCH_ARG="$OPTARG" ;;
-  B) TARGET_BRANCH_ARG="$OPTARG" ;;
-  e) EDITOR_ARG="$OPTARG" ;;
-  u) START_UP="true" ;;
-  v)
-    echo "hap v$VERSION"
-    exit 0
-    ;;
-  c)
-    ACTION="cleanup"
-    PROJECT_ARG="$OPTARG"
-    eval "TASK_ARG=\${$OPTIND}"
-    if [[ -n "$TASK_ARG" && "$TASK_ARG" != -* ]]; then
-      OPTIND=$((OPTIND + 1))
-    else
-      TASK_ARG=""
-    fi
-    ;;
-  D) DELETE_REMOTE="true" ;;
-  y) CONFIRM_YES="true" ;;
-  l)
-    column -t -s "|" "$DB_FILE"
-    exit 0
-    ;;
-  h)
-    usage
-    exit 0
-    ;;
-  *)
-    usage
-    exit 1
-    ;;
-  esac
-done
-
-ensure_setup "$EDITOR_ARG"
-
-case $ACTION in
-save)
-  [[ "$PROJECT_PATH" == "." ]] && FULL_PATH="$(pwd)" || FULL_PATH="$(cd "$PROJECT_PATH" && pwd)"
-  echo "$PROJECT_ARG|$FULL_PATH" >>"$DB_FILE"
-  log_succ "Saved $PROJECT_ARG"
-  ;;
-open)
-  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
-  if [[ -z "$PATH_TO_ROOT" ]]; then
-    log_err "Project not found: $PROJECT_ARG"
-    exit 1
-  fi
-  launch_session "$PROJECT_ARG" "$PATH_TO_ROOT/workspaces/main" "$PROJECT_ARG-main" "$PATH_TO_ROOT" "$EDITOR_ARG"
-  ;;
-worktree)
-  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
-  if [[ -z "$PATH_TO_ROOT" ]]; then
-    log_err "Project not found: $PROJECT_ARG"
-    exit 1
-  fi
-  create_workspace "$PATH_TO_ROOT" "$PROJECT_ARG" "$TASK_ARG" "$BRANCH_ARG" "$EDITOR_ARG" "$TARGET_BRANCH_ARG"
-  ;;
-cleanup)
-  PATH_TO_ROOT=$(grep "^$PROJECT_ARG|" "$DB_FILE" | cut -d '|' -f 2 || true)
-  if [[ -z "$PATH_TO_ROOT" ]]; then
-    log_err "Project not found: $PROJECT_ARG"
-    exit 1
-  fi
-  cleanup_project_workspaces "$PATH_TO_ROOT" "$TASK_ARG"
-  ;;
-interactive)
-  if [[ ! -s "$DB_FILE" ]]; then
-    log_warn "No projects found. Use 'hap init' in your project directory."
-    exit 0
-  fi
-  SELECTION=$(fzf --height=40% --layout=reverse --border --prompt="Select project > " --delimiter="|" --with-nth=1,2 <"$DB_FILE")
-  if [[ -n "$SELECTION" ]]; then
-    NAME=$(echo "$SELECTION" | cut -d '|' -f 1)
-    PATH_TO_ROOT=$(echo "$SELECTION" | cut -d '|' -f 2)
-    launch_session "$NAME" "$PATH_TO_ROOT/workspaces/main" "$NAME-main" "$PATH_TO_ROOT" "$EDITOR_ARG"
-  fi
-  ;;
+  init)    shift; hap_init "$@" ;;
+  open)    shift; hap_open "$@" ;;
+  add)     shift; hap_add "$@" ;;
+  remove)  shift; hap_remove "$@" ;;
+  clean)   shift; hap_clean "$@" ;;
+  list)    hap_list ;;
+  version|-v|--version) echo "hap v$VERSION" ;;
+  help|-h|--help) usage ;;
+  "")      hap_interactive ;;
+  *)       log_err "Unknown command: $1"; echo ""; usage; exit 1 ;;
 esac

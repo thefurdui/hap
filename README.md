@@ -42,7 +42,7 @@ workspaces/
 
 **Good for:** teams, corporations, anyone who works off a backlog. Workspaces are disposable.
 
-Both approaches use the exact same commands. The only difference is whether you run `hap -c` after merging.
+Both approaches use the exact same commands. The only difference is whether you run `hap clean` after merging.
 
 ## Install
 
@@ -76,7 +76,7 @@ That's it. `hap init` detects your repos, scaffolds the directory structure, cre
 Then edit `config/hap.kdl` to set your server start commands, and:
 
 ```bash
-hap -p your-project -u
+hap open your-project -u
 ```
 
 ## Setup
@@ -138,47 +138,51 @@ If you have files that aren't in git but need to exist in every workspace (`.env
 If you already have the directory structure set up (or want to register a project without scaffolding):
 
 ```bash
-hap -s your-project /path/to/project
+hap add your-project /path/to/project
 ```
 
 ## Usage
 
 ```
-hap <command> [args]
-hap [options]
+hap <command> [args] [flags]
 
 Commands:
-  init [name]              Scaffold project from current directory
+  init [name]                    Scaffold project from current directory
+  open <project> [workspace]     Open project or workspace
+  add <name> [path]              Register a project
+  remove <name>                  Unregister a project
+  clean <project> [workspace]    Cleanup workspace(s)
+  list                           List registered projects
+  help                           Show this help
+  version                        Show version
 
-Options:
-  -p <project> [workspace] Open project or workspace
-  -s <name> [path]         Register a project manually
-  -c <name> [workspace]    Cleanup workspace(s)
-  -u                       Auto-start servers on session create
-  -D                       Delete remote branches too (with -c)
-  -y                       Skip confirmation prompts (with -D)
-  -e <editor>              zellij (default), cursor, antigravity
-  -b <branch>              Base branch for new workspaces (default: dev)
-  -B <branch>              Override branch name (default: hap/<workspace>)
-  -d <name>                Unregister a project
-  -l                       List registered projects
-  -v                       Version
-  (no args)                Interactive project picker (fzf)
+Flags for 'open':
+  -u              Auto-start servers (like docker compose up)
+  -e <editor>     Editor: zellij (default), cursor, antigravity
+  -b <branch>     Base branch for new workspace (default: dev)
+  -B <branch>     Target branch name (default: hap/<workspace>)
+
+Flags for 'clean':
+  -D              Also delete remote branches
+  -y              Skip confirmation (with -D)
 ```
+
+Run `hap` with no arguments for interactive project selection (fzf).
 
 ### Open your project (main driver)
 
 ```bash
-hap                          # interactive picker
-hap -p myproject             # direct, servers tab ready but idle
-hap -p myproject -u          # servers auto-start on session create
+hap                               # interactive picker
+hap open myproject                 # direct, servers tab ready but idle
+hap open myproject -u              # servers auto-start on session create
 ```
 
 ### Open a workspace
 
 ```bash
-hap -p myproject bugfix      # opens workspace "bugfix", creates it if it doesn't exist
-hap -p myproject bugfix -u   # same, but servers auto-start
+hap open myproject bugfix          # opens "bugfix", creates it if new
+hap open myproject bugfix -u       # same, but auto-start servers
+hap open myproject bugfix -B feat/login   # custom branch name
 ```
 
 What happens when a workspace is created:
@@ -212,22 +216,30 @@ The whole point: every session already has server panes with the right `cwd` set
 ### Cleanup
 
 ```bash
-hap -c myproject bugfix        # remove workspace + local branch
-hap -c myproject bugfix -D     # also delete remote branch (asks confirmation)
-hap -c myproject bugfix -D -y  # skip confirmation
-hap -c myproject               # bulk cleanup: removes all inactive workspaces
+hap clean myproject bugfix         # remove workspace + local branch
+hap clean myproject bugfix -D      # also delete remote branch (asks confirmation)
+hap clean myproject bugfix -D -y   # skip confirmation
+hap clean myproject                # bulk cleanup: removes all inactive workspaces
 ```
 
 Bulk cleanup skips workspaces that have an active zellij session or a `.hap.gui` lock file (from GUI editors).
 
+### Project management
+
+```bash
+hap add myproject /path/to/root    # register manually (hap init does this for you)
+hap remove myproject               # unregister (doesn't delete files)
+hap list                           # show all registered projects
+```
+
 ### Editors
 
 ```bash
-hap -p myproject -e cursor
-hap -p myproject bugfix -e antigravity
+hap open myproject -e cursor
+hap open myproject bugfix -e antigravity
 ```
 
-GUI editors (`cursor`, `antigravity`) use fire-and-forget mode: `hap` creates a `.hap.gui` lock file and exits. The lock protects the workspace from bulk cleanup. Targeted cleanup (`-c project task`) removes the lock.
+GUI editors (`cursor`, `antigravity`) use fire-and-forget mode: `hap` creates a `.hap.gui` lock file and exits. The lock protects the workspace from bulk cleanup. Targeted cleanup (`hap clean project workspace`) removes the lock.
 
 ## Layout
 
