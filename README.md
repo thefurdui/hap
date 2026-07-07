@@ -8,6 +8,104 @@ You're working on a feature. An agent is running on it. It takes 20 minutes. You
 
 `hap` lets you spin up isolated workspaces — each with its own branch, its own agent, its own terminal session — so you can work on three things at once while agents do the heavy lifting.
 
+## The 4-Pillar Architecture
+
+Every `hap` project is organized into four pillars. Each pillar has one job, and the separation prevents entire categories of bugs (corrupted databases, missing configs, stale locks).
+
+```
+your-project/                       ← project root
+├── sources/                        ← PILLAR 1: bare truth
+│   ├── frontend/                   ← detached HEAD, worktree origin
+│   └── backend/
+├── workspaces/                     ← PILLAR 2: isolated work
+│   ├── main/
+│   │   ├── frontend/               ← git worktree
+│   │   └── backend/
+│   ├── alpha/
+│   └── PROJ-1234/
+├── shared/                         ← PILLAR 3: static config (symlinked)
+│   ├── frontend/
+│   │   └── .env
+│   └── backend/
+│       ├── .env
+│       └── certs/
+│           └── server.pem
+├── data/                           ← PILLAR 4: mutating state (never symlinked)
+│   └── backend/
+│       └── dev.db
+└── config/
+    └── hap.kdl
+```
+
+| Pillar        | Purpose                                                                                   | Symlinked? | Contents                                                         |
+| ------------- | ----------------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------- |
+| `sources/`    | Bare repos with detached HEAD. The single source of truth for git operations.             | —          | `.git`, all tracked files                                        |
+| `workspaces/` | Isolated working copies. Each one gets its own branch, its own agent, its own terminal.   | —          | Git worktrees                                                    |
+| `shared/`     | Static, read-only configuration. Automatically symlinked into every workspace.            | ✅ Yes     | `.env`, `.env.*`, `*.pem`, `*.crt`, `*.key`                      |
+| `data/`       | Mutating, lock-sensitive state. **Never symlinked.** Accessed via path routing in `.env`. | ❌ Never   | `*.db`, `*.sqlite`, `*.sqlite3`, `*.db-wal`, `*.db-shm`, `*.log` |
+
+### Why `shared/` exists
+
+Config files like `.env` aren't committed to git, but every workspace needs them. `hap` symlinks files from `shared/<repo>/` into each workspace, so you maintain one copy and every branch sees it.
+
+### Why `data/` exists (and why databases are never symlinked)
+
+SQLite uses file-level locking and WAL (Write-Ahead Logging). Symlinks break both mechanisms:
+
+- **WAL corruption:** SQLite creates `*.db-wal` and `*.db-shm` files next to the database. If the database is a symlink, the WAL files end up in the workspace directory, not next to the real database. This silently corrupts data.
+- **Lock contention:** Multiple workspaces symlinking to the same database would bypass SQLite's locking, causing concurrent write corruption.
+
+By keeping databases in `data/` and routing to them via `.env` paths, each workspace reads from the same data without symlink hazards.
+
+### Monorepo path preservation
+
+For monorepos, `hap` preserves the internal directory structure when extracting state files. A monorepo like this:
+
+```
+my-saas/
+├── apps/
+│   ├── web/
+│   │   └── .env          ← config
+│   └── api/
+│       ├── .env          ← config
+│       └── prisma/
+│           └── dev.db    ← database
+└── packages/
+    └── auth/
+        └── auth.pem      ← certificate
+```
+
+After `hap init`, the structure is mirrored:
+
+```
+my-saas/
+├── shared/my-saas/
+│   ├── apps/
+│   │   ├── web/.env
+│   │   └── api/.env
+│   └── packages/
+│       └── auth/auth.pem
+├── data/my-saas/
+│   └── apps/
+│       └── api/
+│           └── prisma/dev.db
+└── sources/my-saas/
+    └── (everything else)
+```
+
+### Configuring `.env` paths for `data/`
+
+After init, you need to update `.env` files in `shared/` to reference their databases in `data/` using relative paths. The path must resolve from the file's eventual location inside a workspace (since it's symlinked there).
+
+**Path math:** from `workspaces/<ws>/<repo>/apps/api/.env`, you need to escape up to the project root — that's 5 levels (`../../../../../`) — then descend into `data/<repo>/apps/api/dev.db`.
+
+```bash
+# In shared/my-saas/apps/api/.env:
+DB_PATH=../../../../../data/my-saas/apps/api/prisma/dev.db
+```
+
+The depth depends on how deeply nested the `.env` file is within the monorepo. `hap init` prints the exact calculation for each extracted file.
+
 ## Two Ways to Use It
 
 ### Pets (Permanent Workspaces)
@@ -71,9 +169,9 @@ cd ~/projects/your-project
 hap init
 ```
 
-That's it. `hap init` detects your repos, scaffolds the directory structure, creates worktrees, copies the layout template, and registers the project. You're ready to go.
+That's it. `hap init` detects your repos, scaffolds the 4-pillar directory structure, extracts state files (`.env`, databases, certs) into `shared/` and `data/` preserving their internal paths, creates worktrees, copies the layout template, and registers the project.
 
-Then edit `config/hap.kdl` to set your server start commands, and:
+Then edit `config/hap.kdl` to set your server start commands, update any `.env` paths (if the extraction report tells you to), and:
 
 ```bash
 hap open your-project -u
@@ -86,12 +184,14 @@ hap open your-project -u
 Run `hap init` inside your project directory. It handles two scenarios:
 
 **Single repo** (`.git` at root):
+
 ```bash
 cd ~/projects/myapp    # has .git here
 hap init
 ```
 
 **Multiple repos** (subdirectories with `.git`):
+
 ```bash
 cd ~/projects/myapp    # has frontend/, backend/ with .git inside each
 hap init
@@ -102,36 +202,61 @@ You can pass a custom project name: `hap init my-custom-name`. Defaults to the d
 **What it does:**
 
 1. Scans for git repos (level 0: root `.git`, level 1: subdirs with `.git`)
-2. Creates `sources/`, `workspaces/main/`, `config/`, `shared/`
-3. Moves each repo into `sources/<name>/`
-4. Detaches HEAD in each source repo, creates a worktree in `workspaces/main/<name>/` on the original branch
-5. Moves any leftover files/dirs into `misc/`
-6. Copies `hap.kdl` template into `config/`
-7. Registers the project in `~/.local/share/hap/projects.csv`
+2. Creates the 4-pillar scaffold: `sources/`, `workspaces/main/`, `shared/`, `data/`, `config/`
+3. **Extracts shared state** (`.env`, `.env.*`, `*.pem`, `*.crt`, `*.key`) from each repo into `shared/<repo>/`, preserving internal directory structure
+4. **Extracts mutating state** (`*.db`, `*.sqlite`, `*.sqlite3`, `*.db-wal`, `*.db-shm`, `*.log`) into `data/<repo>/`, preserving internal directory structure
+5. Moves each repo into `sources/<name>/`
+6. Detaches HEAD in each source repo, creates a worktree in `workspaces/main/<name>/` on the original branch
+7. Moves any leftover files/dirs into `misc/`
+8. Copies `hap.kdl` template into `config/`
+9. Registers the project in `~/.local/share/hap/projects.csv`
+10. **Prints a state extraction report** showing exactly what was moved and where
 
-**Result:**
+Excluded from scanning: `node_modules/`, `vendor/`, `.git/`, `dist/`, `build/`.
+
+**Result (monorepo example):**
+
 ```
 your-project/
 ├── config/
-│   └── hap.kdl         ← edit this: cwd paths, server commands
+│   └── hap.kdl             ← edit this: cwd paths, server commands
 ├── sources/
-│   ├── frontend/       ← detached HEAD, used for worktree ops
-│   └── backend/
+│   └── my-saas/            ← detached HEAD, worktree origin
+│       └── apps/
+│           ├── web/        ← .env extracted to shared/
+│           └── api/        ← .env + db extracted
 ├── workspaces/
 │   └── main/
-│       ├── frontend/   ← git worktree (your working copy)
-│       └── backend/
-├── shared/             ← put .env files, certs, etc. here
-└── misc/               ← leftover non-repo files (if any)
+│       └── my-saas/        ← git worktree (your working copy)
+│           └── apps/
+│               └── api/
+│                   └── .env  ← symlink → shared/my-saas/apps/api/.env
+├── shared/
+│   └── my-saas/
+│       └── apps/
+│           ├── web/.env
+│           └── api/.env
+├── data/
+│   └── my-saas/
+│       └── apps/
+│           └── api/
+│               └── prisma/dev.db
+└── misc/                    ← leftover non-repo files (if any)
 ```
 
 ### Shared State
 
-If you have files that aren't in git but need to exist in every workspace (`.env`, local certs, IDE configs):
+Files in `shared/` are automatically symlinked into every workspace. `hap init` populates `shared/` for you, but you can also manage it manually:
 
 1. Create a folder in `shared/` named after the repo: `shared/backend/`
 2. Mirror the file's relative path: `shared/backend/.env`
 3. `hap` will symlink these into every new workspace automatically
+
+### Data State
+
+Files in `data/` are **never symlinked**. Applications access them via paths configured in `.env` files. `hap init` populates `data/` for you during initialization.
+
+To add new databases later, place them directly in `data/<repo>/` and update your `.env` accordingly.
 
 ### Manual Registration
 
@@ -191,7 +316,7 @@ What happens when a workspace is created:
 2. Adds git worktrees from every repo in `sources/` (branch: `hap/bugfix`)
 3. Pushes the branch to origin
 4. Installs dependencies in the background (pnpm/go)
-5. Symlinks shared state from `shared/`
+5. Symlinks shared state from `shared/` (preserving nested directory structure)
 6. Opens a zellij session
 
 If the workspace already exists, it just opens it.
@@ -200,10 +325,10 @@ If the workspace already exists, it just opens it.
 
 Every session gets a "servers" tab with panes for each service. The `-u` flag controls what happens **when the session is first created**:
 
-| | Without `-u` | With `-u` |
-|---|---|---|
-| Server panes | Open to a ready shell | Auto-run your start command |
-| Use case | Workspaces where you just need code + agent | Main driver where you want servers up immediately |
+|              | Without `-u`                                | With `-u`                                         |
+| ------------ | ------------------------------------------- | ------------------------------------------------- |
+| Server panes | Open to a ready shell                       | Auto-run your start command                       |
+| Use case     | Workspaces where you just need code + agent | Main driver where you want servers up immediately |
 
 **After the session is created, `-u` doesn't matter anymore.** You're inside a living zellij session. You manage servers manually from there:
 
