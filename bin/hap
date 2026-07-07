@@ -8,7 +8,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="0.7.0"
+VERSION="1.0.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -21,6 +21,9 @@ BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
 
 log_info() { echo -e "${BLUE}INFO:${NC} $1"; }
@@ -29,6 +32,119 @@ log_warn() { echo -e "${YELLOW}WARN:${NC} $1"; }
 log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
 
 # --- HELPERS ---
+
+# Directories to exclude when scanning for state files
+STATE_EXCLUDE_DIRS="node_modules vendor .git dist build"
+
+# Build find exclusion arguments from the directory list
+_build_find_excludes() {
+  local args=()
+  local first=true
+  for dir in $STATE_EXCLUDE_DIRS; do
+    if [[ "$first" == true ]]; then
+      args+=("-name" "$dir")
+      first=false
+    else
+      args+=("-o" "-name" "$dir")
+    fi
+  done
+  # Return: \( -name node_modules -o -name vendor ... \) -prune
+  echo "(" "${args[@]}" ")" "-prune"
+}
+
+# Extract shared config files (.env, .pem, .crt, .key) preserving directory structure.
+# Args: <repo_source_path> <shared_dest_dir>
+# Populates the global SHARED_MOVED array with "<relative_path>" entries.
+SHARED_MOVED=()
+extract_shared_state() {
+  local repo_path="$1"
+  local dest_dir="$2"
+
+  SHARED_MOVED=()
+  (
+    cd "$repo_path" || return
+    # Find config files, excluding build/vendor dirs
+    find . \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name build \) -prune \
+      -o \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -type f -print
+  ) | while IFS= read -r file; do
+    local clean_file="${file#./}"
+    local dest_file="$dest_dir/$clean_file"
+    mkdir -p "$(dirname "$dest_file")"
+    mv "$repo_path/$clean_file" "$dest_file"
+    echo "$clean_file"
+  done
+}
+
+# Extract mutating data files (.db, .sqlite, .log, WAL) preserving directory structure.
+# Args: <repo_source_path> <data_dest_dir>
+# Outputs moved file paths to stdout (one per line).
+extract_data_state() {
+  local repo_path="$1"
+  local dest_dir="$2"
+
+  (
+    cd "$repo_path" || return
+    find . \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name build \) -prune \
+      -o \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db-wal' -o -name '*.db-shm' -o -name '*.log' \) -type f -print
+  ) | while IFS= read -r file; do
+    local clean_file="${file#./}"
+    local dest_file="$dest_dir/$clean_file"
+    mkdir -p "$(dirname "$dest_file")"
+    mv "$repo_path/$clean_file" "$dest_file"
+    echo "$clean_file"
+  done
+}
+
+# Print a highly visible summary block of what was moved during init.
+# Args: <repo_name> <shared_files_string> <data_files_string> <project_root>
+print_state_extraction_summary() {
+  local repo_name="$1"
+  local shared_files="$2"
+  local data_files="$3"
+  local project_root="$4"
+
+  if [[ -z "$shared_files" && -z "$data_files" ]]; then
+    return
+  fi
+
+  echo ""
+  echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}${BOLD}║  STATE EXTRACTION REPORT: ${repo_name}${NC}"
+  echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+
+  if [[ -n "$shared_files" ]]; then
+    echo ""
+    echo -e "  ${GREEN}${BOLD}shared/${repo_name}/${NC} ${DIM}(config — symlinked into workspaces)${NC}"
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      echo -e "    ${DIM}→${NC} $f"
+    done <<<"$shared_files"
+  fi
+
+  if [[ -n "$data_files" ]]; then
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}data/${repo_name}/${NC} ${DIM}(databases/logs — never symlinked)${NC}"
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      echo -e "    ${DIM}→${NC} $f"
+    done <<<"$data_files"
+  fi
+
+  if [[ -n "$shared_files" && -n "$data_files" ]]; then
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}⚠  ACTION REQUIRED:${NC}"
+    echo -e "  ${YELLOW}Update .env files in shared/ to point to data/ using relative paths.${NC}"
+    echo -e "  ${DIM}From a workspace, the path escapes up through workspaces/<ws>/<repo>/...${NC}"
+    echo ""
+    echo -e "  ${DIM}Example:${NC}"
+    echo -e "  ${DIM}  If .env is at:  shared/${repo_name}/apps/api/.env${NC}"
+    echo -e "  ${DIM}  And DB is at:   data/${repo_name}/apps/api/dev.db${NC}"
+    echo -e "  ${DIM}  Then in .env:   DB_PATH=../../../../../data/${repo_name}/apps/api/dev.db${NC}"
+    echo -e "  ${DIM}  (resolve from workspace: workspaces/<ws>/${repo_name}/apps/api/ → ../../../../.. → project root)${NC}"
+  fi
+
+  echo -e "${CYAN}${BOLD}────────────────────────────────────────────────────────────────${NC}"
+}
 
 zellij_session_exists() {
   local session_name="$1"
@@ -410,11 +526,15 @@ hap_init() {
 
   log_info "Initializing hap project: $project_name (${#repos[@]} repo(s))"
 
-  # Create scaffold
+  # Create scaffold (4-Pillar Architecture)
   mkdir -p "$project_root/sources"
   mkdir -p "$project_root/workspaces/main"
   mkdir -p "$project_root/config"
   mkdir -p "$project_root/shared"
+  mkdir -p "$project_root/data"
+
+  # Track all extraction reports for final summary
+  local all_extraction_reports=()
 
   if [[ "$is_root_repo" == true ]]; then
     # --- Single repo at root ---
@@ -428,13 +548,29 @@ hap_init() {
       local item_name
       item_name=$(basename "$item")
       case "$item_name" in
-      sources | workspaces | config | shared | .hap-init-staging) continue ;;
+      sources | workspaces | config | shared | data | .hap-init-staging) continue ;;
       esac
       mv "$item" "$staging/" 2>/dev/null || true
     done
 
     # Staging becomes the source repo
     mv "$staging" "$project_root/sources/$project_name"
+
+    # --- Extract state files (preserving monorepo paths) ---
+    mkdir -p "$project_root/shared/$project_name"
+    mkdir -p "$project_root/data/$project_name"
+
+    local shared_files data_files
+    shared_files=$(extract_shared_state "$project_root/sources/$project_name" "$project_root/shared/$project_name")
+    data_files=$(extract_data_state "$project_root/sources/$project_name" "$project_root/data/$project_name")
+
+    # Clean up empty extraction dirs
+    rmdir "$project_root/shared/$project_name" 2>/dev/null || true
+    rmdir "$project_root/data/$project_name" 2>/dev/null || true
+
+    if [[ -n "$shared_files" || -n "$data_files" ]]; then
+      all_extraction_reports+=("$project_name"$'\x1f'"$shared_files"$'\x1f'"$data_files")
+    fi
 
     # Detach HEAD in source to free the branch name for the worktree
     local current_branch
@@ -460,12 +596,28 @@ hap_init() {
 
       # Skip scaffold dirs
       case "$item_name" in
-      sources | workspaces | config | shared | misc) continue ;;
+      sources | workspaces | config | shared | data | misc) continue ;;
       esac
 
       if [[ -d "$item/.git" ]]; then
         # Git repo — move to sources
         mv "$item" "$project_root/sources/$item_name"
+
+        # --- Extract state files (preserving monorepo paths) ---
+        mkdir -p "$project_root/shared/$item_name"
+        mkdir -p "$project_root/data/$item_name"
+
+        local shared_files data_files
+        shared_files=$(extract_shared_state "$project_root/sources/$item_name" "$project_root/shared/$item_name")
+        data_files=$(extract_data_state "$project_root/sources/$item_name" "$project_root/data/$item_name")
+
+        # Clean up empty extraction dirs
+        rmdir "$project_root/shared/$item_name" 2>/dev/null || true
+        rmdir "$project_root/data/$item_name" 2>/dev/null || true
+
+        if [[ -n "$shared_files" || -n "$data_files" ]]; then
+          all_extraction_reports+=("$item_name"$'\x1f'"$shared_files"$'\x1f'"$data_files")
+        fi
 
         local current_branch
         current_branch=$(git -C "$project_root/sources/$item_name" symbolic-ref --short HEAD 2>/dev/null || echo "")
@@ -527,11 +679,23 @@ hap_init() {
   fi
   echo "${project_name}|${project_root}" >>"$DB_FILE"
 
+  # --- Print state extraction summaries ---
+  for report in "${all_extraction_reports[@]}"; do
+    local r_name r_shared r_data
+    IFS=$'\x1f' read -r r_name r_shared r_data <<<"$report"
+    print_state_extraction_summary "$r_name" "$r_shared" "$r_data" "$project_root"
+  done
+
   echo ""
   log_succ "Project initialized: $project_name"
   log_info "Next steps:"
   log_info "  1. Edit config/hap.kdl — set cwd paths and server commands"
-  log_info "  2. Run: hap open $project_name"
+  if [[ ${#all_extraction_reports[@]} -gt 0 ]]; then
+    log_info "  2. Update .env files in shared/ to point to new data/ paths"
+    log_info "  3. Run: hap open $project_name"
+  else
+    log_info "  2. Run: hap open $project_name"
+  fi
 }
 
 # --- COMMANDS ---
@@ -542,10 +706,22 @@ hap_open() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    -u) START_UP="true"; shift ;;
-    -e) editor="${2:?'-e requires an editor name'}"; shift 2 ;;
-    -b) base_branch="${2:?'-b requires a branch name'}"; shift 2 ;;
-    -B) target_branch="${2:?'-B requires a branch name'}"; shift 2 ;;
+    -u)
+      START_UP="true"
+      shift
+      ;;
+    -e)
+      editor="${2:?'-e requires an editor name'}"
+      shift 2
+      ;;
+    -b)
+      base_branch="${2:?'-b requires a branch name'}"
+      shift 2
+      ;;
+    -B)
+      target_branch="${2:?'-B requires a branch name'}"
+      shift 2
+      ;;
     -*)
       log_err "Unknown option: $1"
       log_err "Usage: hap open <project> [workspace] [-u] [-e editor] [-b branch] [-B branch]"
@@ -632,8 +808,14 @@ hap_clean() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    -D) DELETE_REMOTE="true"; shift ;;
-    -y) CONFIRM_YES="true"; shift ;;
+    -D)
+      DELETE_REMOTE="true"
+      shift
+      ;;
+    -y)
+      CONFIRM_YES="true"
+      shift
+      ;;
     -*)
       log_err "Unknown option: $1"
       log_err "Usage: hap clean <project> [workspace] [-D] [-y]"
@@ -732,14 +914,34 @@ EOF
 # --- MAIN ---
 
 case "${1:-}" in
-  init)    shift; hap_init "$@" ;;
-  open)    shift; hap_open "$@" ;;
-  add)     shift; hap_add "$@" ;;
-  remove)  shift; hap_remove "$@" ;;
-  clean)   shift; hap_clean "$@" ;;
-  list)    hap_list ;;
-  version|-v|--version) echo "hap v$VERSION" ;;
-  help|-h|--help) usage ;;
-  "")      hap_interactive ;;
-  *)       log_err "Unknown command: $1"; echo ""; usage; exit 1 ;;
+init)
+  shift
+  hap_init "$@"
+  ;;
+open)
+  shift
+  hap_open "$@"
+  ;;
+add)
+  shift
+  hap_add "$@"
+  ;;
+remove)
+  shift
+  hap_remove "$@"
+  ;;
+clean)
+  shift
+  hap_clean "$@"
+  ;;
+list) hap_list ;;
+version | -v | --version) echo "hap v$VERSION" ;;
+help | -h | --help) usage ;;
+"") hap_interactive ;;
+*)
+  log_err "Unknown command: $1"
+  echo ""
+  usage
+  exit 1
+  ;;
 esac
