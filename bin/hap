@@ -324,6 +324,27 @@ ensure_db() {
 
 # --- SESSION LAUNCH ---
 
+# Print available layout profile names for a project (one per line).
+# Returns 0 if any profiles exist, 1 otherwise.
+list_project_profiles() {
+  local project_root="$1"
+  local profiles_dir="$project_root/config/profiles"
+  local found=0
+  local f
+
+  if [[ ! -d "$profiles_dir" ]]; then
+    return 1
+  fi
+
+  for f in "$profiles_dir"/*.kdl; do
+    [[ -f "$f" ]] || continue
+    basename "$f" .kdl
+    found=1
+  done
+
+  [[ $found -eq 1 ]]
+}
+
 # Resolve zellij layout for a project.
 # Prefer config/profiles/<name>.kdl when a profile is requested;
 # otherwise fall back to config/hap.kdl.
@@ -338,16 +359,13 @@ resolve_layout_file() {
     if [[ ! -f "$candidate" ]]; then
       log_err "Profile not found: $profile"
       log_err "Expected: $candidate"
-      if [[ -d "$config_dir/profiles" ]]; then
-        local available=()
-        local f
-        for f in "$config_dir/profiles"/*.kdl; do
-          [[ -f "$f" ]] || continue
-          available+=("$(basename "$f" .kdl)")
+      if list_project_profiles "$project_root" >/dev/null; then
+        log_err "Available profiles:"
+        list_project_profiles "$project_root" | while IFS= read -r name; do
+          log_err "  $name"
         done
-        if [[ ${#available[@]} -gt 0 ]]; then
-          log_err "Available profiles: ${available[*]}"
-        fi
+      else
+        log_err "No profiles found in $config_dir/profiles/"
       fi
       return 1
     fi
@@ -743,6 +761,7 @@ hap_init() {
 
 hap_open() {
   local project="" workspace="" editor="zellij" base_branch="dev" target_branch="" profile=""
+  local list_profiles=false
   START_UP="false"
 
   while [[ $# -gt 0 ]]; do
@@ -764,8 +783,14 @@ hap_open() {
       shift 2
       ;;
     -p | --profile)
-      profile="${2:?'-p/--profile requires a profile name'}"
-      shift 2
+      # Missing or incomplete value → list profiles after project is known
+      if [[ -z "${2:-}" || "$2" == -* ]]; then
+        list_profiles=true
+        shift
+      else
+        profile="$2"
+        shift 2
+      fi
       ;;
     -*)
       log_err "Unknown option: $1"
@@ -801,7 +826,15 @@ hap_open() {
     exit 1
   fi
 
-  # Fail fast on bad profile before touching sessions/workspaces
+  if [[ "$list_profiles" == true ]]; then
+    if list_project_profiles "$path_to_root"; then
+      exit 0
+    fi
+    log_err "No profiles found in $path_to_root/config/profiles/"
+    exit 1
+  fi
+
+  # Fail fast on bad / incomplete profile before touching sessions/workspaces
   if [[ -n "$profile" ]]; then
     resolve_layout_file "$path_to_root" "$profile" >/dev/null || exit 1
   fi
@@ -950,6 +983,7 @@ Commands:
 Flags for 'open':
   -u              Auto-start servers (like docker compose up)
   -p, --profile   Layout profile from config/profiles/<name>.kdl
+                  Omit the name (hap open <project> -p) to list profiles
   -e <editor>     Editor: zellij (default), cursor, antigravity
   -b <branch>     Base branch for new workspace (default: dev)
   -B <branch>     Target branch name (default: hap/<workspace>)

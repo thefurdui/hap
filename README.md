@@ -286,6 +286,7 @@ Commands:
 Flags for 'open':
   -u              Auto-start servers (like docker compose up)
   -p, --profile   Layout profile from config/profiles/<name>.kdl
+                  (omit name to list: hap open myproject -p)
   -e <editor>     Editor: zellij (default), cursor, antigravity
   -b <branch>     Base branch for new workspace (default: dev)
   -B <branch>     Target branch name (default: hap/<workspace>)
