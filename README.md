@@ -34,7 +34,9 @@ your-project/                       ← project root
 │   └── backend/
 │       └── dev.db
 └── config/
-    └── hap.kdl
+    ├── hap.kdl                 ← default layout
+    └── profiles/               ← optional named layouts (-p)
+        └── auth-beat.kdl
 ```
 
 | Pillar        | Purpose                                                                                   | Symlinked? | Contents                                                         |
@@ -283,6 +285,7 @@ Commands:
 
 Flags for 'open':
   -u              Auto-start servers (like docker compose up)
+  -p, --profile   Layout profile from config/profiles/<name>.kdl
   -e <editor>     Editor: zellij (default), cursor, antigravity
   -b <branch>     Base branch for new workspace (default: dev)
   -B <branch>     Target branch name (default: hap/<workspace>)
@@ -300,6 +303,7 @@ Run `hap` with no arguments for interactive project selection (fzf).
 hap                               # interactive picker
 hap open myproject                 # direct, servers tab ready but idle
 hap open myproject -u              # servers auto-start on session create
+hap open myproject -p auth-beat    # use config/profiles/auth-beat.kdl
 ```
 
 ### Open a workspace
@@ -308,6 +312,7 @@ hap open myproject -u              # servers auto-start on session create
 hap open myproject bugfix          # opens "bugfix", creates it if new
 hap open myproject bugfix -u       # same, but auto-start servers
 hap open myproject bugfix -B feat/login   # custom branch name
+hap open myproject bugfix -p landing -u   # profile + workspace
 ```
 
 What happens when a workspace is created:
@@ -368,7 +373,7 @@ GUI editors (`cursor`, `antigravity`) use fire-and-forget mode: `hap` creates a 
 
 ## Layout
 
-There's one layout file: `hap.kdl`. It has two tabs:
+Default layout file: `config/hap.kdl`. It usually has two tabs:
 
 1. **code** — your editors + agent pane
 2. **servers** — server processes, lazygit, and spare shells
@@ -376,6 +381,33 @@ There's one layout file: `hap.kdl`. It has two tabs:
 Edit `config/hap.kdl` to match your project. The template uses `frontend/` and `backend/` as example `cwd` paths — change them to your actual repo names from `sources/`.
 
 The server panes check the `HAP_UP` env var to decide whether to auto-run. Replace the placeholder `echo` commands with your real start commands. See [templates/hap.kdl](templates/hap.kdl) for the pattern.
+
+### Layout profiles
+
+When one project needs different pane setups (auth+beat vs landing-only, etc.), put named layouts in `config/profiles/` and select them with `-p` / `--profile`:
+
+```
+config/
+├── hap.kdl                 ← default (used when no -p)
+└── profiles/
+    ├── auth-beat.kdl
+    ├── auth-gain.kdl
+    ├── beat-gain.kdl
+    └── landing.kdl
+```
+
+```bash
+hap open myproject -p auth-beat
+hap open myproject -p landing -u
+```
+
+Resolution:
+
+1. `-p <name>` → `config/profiles/<name>.kdl` (errors if missing)
+2. else → `config/hap.kdl` if present
+3. else → open zellij with no custom layout
+
+Profiles only change which layout file zellij loads. They do not change which repos get worktrees — every workspace still gets all `sources/`.
 
 ## Data
 

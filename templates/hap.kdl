@@ -29,8 +29,9 @@ layout {
     // Always present in every session (main and workspaces alike).
     //
     // How -u works:
-    //   hap -p project -u   → HAP_UP=1 → server commands run on session start
-    //   hap -p project      → HAP_UP unset → panes open to a ready shell
+    //   hap open project -u              → HAP_UP=1 → server commands run on session start
+    //   hap open project                 → HAP_UP unset → panes open to a ready shell
+    //   hap open project -p auth-beat    → load config/profiles/auth-beat.kdl instead of hap.kdl
     //
     // The -u flag only matters when the session is first created.
     // After that, everything is manual inside the living zellij session:

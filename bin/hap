@@ -8,7 +8,7 @@ set -e
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="1.0.0"
+VERSION="1.1.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
@@ -324,12 +324,50 @@ ensure_db() {
 
 # --- SESSION LAUNCH ---
 
+# Resolve zellij layout for a project.
+# Prefer config/profiles/<name>.kdl when a profile is requested;
+# otherwise fall back to config/hap.kdl.
+# Prints the path on stdout. Returns 1 if a requested profile is missing.
+resolve_layout_file() {
+  local project_root="$1"
+  local profile="${2:-}"
+  local config_dir="$project_root/config"
+
+  if [[ -n "$profile" ]]; then
+    local candidate="$config_dir/profiles/${profile}.kdl"
+    if [[ ! -f "$candidate" ]]; then
+      log_err "Profile not found: $profile"
+      log_err "Expected: $candidate"
+      if [[ -d "$config_dir/profiles" ]]; then
+        local available=()
+        local f
+        for f in "$config_dir/profiles"/*.kdl; do
+          [[ -f "$f" ]] || continue
+          available+=("$(basename "$f" .kdl)")
+        done
+        if [[ ${#available[@]} -gt 0 ]]; then
+          log_err "Available profiles: ${available[*]}"
+        fi
+      fi
+      return 1
+    fi
+    echo "$candidate"
+    return 0
+  fi
+
+  if [[ -f "$config_dir/hap.kdl" ]]; then
+    echo "$config_dir/hap.kdl"
+  fi
+  return 0
+}
+
 launch_session() {
   local project_name="$1"
   local workspace_path="$2"
   local session_name="$3"
   local project_root="$4"
   local editor="${5:-zellij}"
+  local profile="${6:-}"
 
   [[ ! -d "$workspace_path" ]] && {
     log_err "Path not found: $workspace_path"
@@ -342,15 +380,17 @@ launch_session() {
 
   case "$editor" in
   zellij)
+    local layout_file=""
+    if ! layout_file="$(resolve_layout_file "$project_root" "$profile")"; then
+      exit 1
+    fi
+
+    if [[ -n "$profile" ]]; then
+      log_info "Layout profile: $profile"
+    fi
+
     # Prune Zellij session if it exists (Restart context)
     zellij delete-session "$session_name" 2>/dev/null || true
-
-    local layout_file=""
-    local project_config_dir="$project_root/config"
-
-    if [[ -f "$project_config_dir/hap.kdl" ]]; then
-      layout_file="$project_config_dir/hap.kdl"
-    fi
 
     local args=()
     [[ -n "$layout_file" ]] && args+=("--new-session-with-layout" "$layout_file") || true
@@ -399,6 +439,7 @@ create_workspace() {
   local base_branch="$4"
   local editor="${5:-zellij}"
   local target_branch_prefix="$6"
+  local profile="${7:-}"
 
   local sources_dir="$project_root/sources"
   local target_ws="$project_root/workspaces/$agent_task"
@@ -480,7 +521,7 @@ create_workspace() {
 
   local original_dir=$(pwd)
   cd "$target_ws" || exit 1
-  launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "$project_root" "$editor"
+  launch_session "$project_name" "$target_ws" "$project_name-$agent_task" "$project_root" "$editor" "$profile"
   cd "$original_dir" || true
 }
 
@@ -701,7 +742,7 @@ hap_init() {
 # --- COMMANDS ---
 
 hap_open() {
-  local project="" workspace="" editor="zellij" base_branch="dev" target_branch=""
+  local project="" workspace="" editor="zellij" base_branch="dev" target_branch="" profile=""
   START_UP="false"
 
   while [[ $# -gt 0 ]]; do
@@ -722,9 +763,13 @@ hap_open() {
       target_branch="${2:?'-B requires a branch name'}"
       shift 2
       ;;
+    -p | --profile)
+      profile="${2:?'-p/--profile requires a profile name'}"
+      shift 2
+      ;;
     -*)
       log_err "Unknown option: $1"
-      log_err "Usage: hap open <project> [workspace] [-u] [-e editor] [-b branch] [-B branch]"
+      log_err "Usage: hap open <project> [workspace] [-u] [-p profile] [-e editor] [-b branch] [-B branch]"
       exit 1
       ;;
     *)
@@ -743,7 +788,7 @@ hap_open() {
 
   if [[ -z "$project" ]]; then
     log_err "Project name required"
-    log_err "Usage: hap open <project> [workspace] [-u] [-e editor]"
+    log_err "Usage: hap open <project> [workspace] [-u] [-p profile] [-e editor]"
     exit 1
   fi
 
@@ -756,10 +801,15 @@ hap_open() {
     exit 1
   fi
 
+  # Fail fast on bad profile before touching sessions/workspaces
+  if [[ -n "$profile" ]]; then
+    resolve_layout_file "$path_to_root" "$profile" >/dev/null || exit 1
+  fi
+
   if [[ -n "$workspace" ]]; then
-    create_workspace "$path_to_root" "$project" "$workspace" "$base_branch" "$editor" "$target_branch"
+    create_workspace "$path_to_root" "$project" "$workspace" "$base_branch" "$editor" "$target_branch" "$profile"
   else
-    launch_session "$project" "$path_to_root/workspaces/main" "$project-main" "$path_to_root" "$editor"
+    launch_session "$project" "$path_to_root/workspaces/main" "$project-main" "$path_to_root" "$editor" "$profile"
   fi
 }
 
@@ -899,6 +949,7 @@ Commands:
 
 Flags for 'open':
   -u              Auto-start servers (like docker compose up)
+  -p, --profile   Layout profile from config/profiles/<name>.kdl
   -e <editor>     Editor: zellij (default), cursor, antigravity
   -b <branch>     Base branch for new workspace (default: dev)
   -B <branch>     Target branch name (default: hap/<workspace>)
