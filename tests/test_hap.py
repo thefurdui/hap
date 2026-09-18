@@ -319,14 +319,14 @@ class HapTests(unittest.TestCase):
         self.repo(files={"file.txt": "x", "pnpm-lock.yaml": "fixture"})
         self.register()
         self.stub("pnpm", 'sleep 0.1\nprintf finished > "$PWD/install.finished"\nexit 7')
-        result = self.hap("open", "project", "task", check=False)
+        result = self.hap("open", "project", "task", "--install", check=False)
         self.assertNotEqual(result.returncode, 0)
         work = self.project / "workspaces/task"
         self.assertTrue((work / "app/install.finished").exists())
         self.assertFalse((work / ".hap-ready").exists())
         self.assertFalse((self.base / "commands.log").exists())
         self.stub("pnpm", "exit 0")
-        self.hap("open", "project", "task")
+        self.hap("open", "project", "task", "--install")
         self.assertTrue((work / ".hap-ready").exists())
 
     def test_registry_sole_entry_upsert_and_remove(self):
@@ -409,7 +409,7 @@ class HapTests(unittest.TestCase):
         self.repo()
         self.register()
         self.stub("git", f'if [ "$3" = push ]; then exit 9; fi\nexec "{GIT}" "$@"')
-        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertNotEqual(self.hap("open", "project", "task", "--publish", check=False).returncode, 0)
         self.assertFalse((self.project / "workspaces/task/.hap-ready").exists())
 
     def installer_fixture(self):
@@ -501,6 +501,18 @@ class HapTests(unittest.TestCase):
         self.assertEqual(data.read_text(), "retained database")
         self.hap("open", "project", "three", "--shared-data")
         self.assertTrue((self.project / "data/shared/app").is_dir())
+
+    def test_open_does_not_install_or_publish_without_options(self):
+        source = self.repo(files={"file.txt": "x", "pnpm-lock.yaml": "fixture"})
+        self.register()
+        self.stub("pnpm", 'printf executed > "$PWD/install.executed"')
+        self.hap("open", "project", "task")
+        marker = self.project / "workspaces/task/app/install.executed"
+        self.assertFalse(marker.exists())
+        self.assertNotIn("hap/task", self.git(source, "ls-remote", "--heads", "origin").stdout)
+        self.hap("open", "project", "task", "--install", "--publish")
+        self.assertTrue(marker.exists())
+        self.assertIn("hap/task", self.git(source, "ls-remote", "--heads", "origin").stdout)
 
 
 if __name__ == "__main__":

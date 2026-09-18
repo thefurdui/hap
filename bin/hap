@@ -628,6 +628,7 @@ setup_workspace_repo() {
       done
     ) || return 1
   fi
+  [[ "${INSTALL_DEPS:-false}" == true ]] || return 0
   if [[ -f "$work/pnpm-lock.yaml" ]]; then
     (cd "$work" && pnpm install --frozen-lockfile) || return 1
   elif [[ -f "$work/go.mod" ]]; then
@@ -709,9 +710,14 @@ prepare_workspace() {
           base_oid=$(resolve_base_commit "$repo" "$base_branch") || return 1
           git -C "$repo" worktree add "$work" -b "$branch_name" "$base_oid" || return 1
         fi
-        git -C "$work" push -u origin "$branch_name" || return 1
       fi
       setup_workspace_repo "$project_root" "$target_ws" "$repo_name" || return 1
+      if [[ "${PUBLISH_BRANCH:-false}" == true ]]; then
+        branch_name=$(git -C "$work" symbolic-ref --quiet --short HEAD) || {
+          log_err "Cannot publish a detached worktree"; return 1;
+        }
+        git -C "$work" push -u origin "$branch_name" || return 1
+      fi
     fi
   done
   printf '1\n' > "$target_ws/.hap-ready" || return 1
@@ -977,11 +983,15 @@ hap_open() {
   REUSE_BRANCH=false
   SHARED_CONFIG=false
   SHARED_DATA=false
+  INSTALL_DEPS=false
+  PUBLISH_BRANCH=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
     --shared-config) SHARED_CONFIG=true; shift ;;
     --shared-data) SHARED_DATA=true; shift ;;
+    --install) INSTALL_DEPS=true; shift ;;
+    --publish) PUBLISH_BRANCH=true; shift ;;
     --fetch) FETCH_BASE=true; shift ;;
     --reuse-branch) REUSE_BRANCH=true; shift ;;
     -u)
