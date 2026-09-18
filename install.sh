@@ -7,7 +7,7 @@ REF="${HAP_INSTALL_REF:-v1.2.0}"
   printf 'Invalid HAP_INSTALL_REF: %s\n' "$REF" >&2; exit 1;
 }
 BIN_DIR="${HAP_BIN_DIR:-$HOME/.local/bin}"
-DATA_DIR="${HAP_DATA_DIR:-$HOME/.local/share/hap}"
+DATA_DIR="${HAP_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/hap}"
 BASE_URL="https://raw.githubusercontent.com/thefurdui/hap/$REF"
 for dependency in curl bash install mktemp; do
   command -v "$dependency" >/dev/null || { printf 'Missing dependency: %s\n' "$dependency" >&2; exit 1; }

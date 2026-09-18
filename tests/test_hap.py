@@ -562,6 +562,13 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
         self.assertTrue(work.exists())
 
+    def test_installer_uses_runtime_xdg_directory(self):
+        self.installer_fixture()
+        self.env.pop("HAP_DATA_DIR")
+        self.run_cmd(["bash", ROOT / "install.sh"])
+        target = Path(self.env["XDG_DATA_HOME"]) / "hap/templates/hap.kdl"
+        self.assertEqual(target.read_bytes(), (ROOT / "templates/hap.kdl").read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()

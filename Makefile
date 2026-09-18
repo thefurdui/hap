@@ -1,7 +1,8 @@
 # Variables
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
-DATADIR ?= $(HOME)/.local/share/hap
+XDG_DATA_HOME ?= $(HOME)/.local/share
+DATADIR ?= $(XDG_DATA_HOME)/hap
 SCRIPT = bin/hap
 TEMPLATE = templates/hap.kdl
 
