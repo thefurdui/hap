@@ -15,7 +15,7 @@ Install from a reviewed checkout:
 ```sh
 git clone https://github.com/thefurdui/hap.git
 cd hap
-git checkout v1.2.0
+git checkout v1.2.1
 make install
 ```
 

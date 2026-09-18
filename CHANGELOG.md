@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1] - 2026-09-18
+
+- Use compact path-based session names that fit macOS's default Zellij socket directory. Existing v1.2.0 sessions remain attachable and protected during cleanup.
+- Preserve exact legacy shared file and directory links, including absolute links and certificate directories, without writing through them or replacing their contents.
+- Reopen existing single-repository flat workspaces without relocating files. Preserve Finder metadata in source directories without treating it as a repository.
+- Allow `config/repositories` to select active sources while retaining archived repositories and their worktrees in place.
+- Add regressions for each compatibility failure encountered in existing projects.
+
 ## [1.2.0] - 2026-09-18
 
 This release addresses all 32 findings from the security and implementation review. Each finding has its own conventional commit; the [implementation record](docs/v1.2.0-work.md) lists the complete scope.
