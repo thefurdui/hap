@@ -458,6 +458,35 @@ class HapTests(unittest.TestCase):
         self.assertFalse((prefix / "bin/hap").exists())
         self.assertEqual(sentinel.read_text(), "keep")
 
+    def test_config_copies_are_isolated_and_edits_survive_cleanup(self):
+        self.repo()
+        shared = self.project / "shared/app"
+        shared.mkdir(parents=True)
+        (shared / ".env").write_text("seed")
+        self.register()
+        self.hap("open", "project", "one")
+        self.hap("open", "project", "two")
+        one = self.project / "workspaces/one/app/.env"
+        two = self.project / "workspaces/two/app/.env"
+        self.assertFalse(one.is_symlink())
+        self.assertEqual(one.stat().st_mode & 0o777, 0o600)
+        one.write_text("edited")
+        self.assertEqual(two.read_text(), "seed")
+        self.assertEqual((shared / ".env").read_text(), "seed")
+        self.assertNotEqual(self.hap("clean", "project", "one", check=False).returncode, 0)
+        self.assertEqual(one.read_text(), "edited")
+        self.hap("clean", "project", "two")
+        self.assertFalse(two.parent.exists())
+
+    def test_shared_config_links_require_explicit_option(self):
+        self.repo()
+        shared = self.project / "shared/app"
+        shared.mkdir(parents=True)
+        (shared / ".env").write_text("seed")
+        self.register()
+        self.hap("open", "project", "task", "--shared-config")
+        self.assertTrue((self.project / "workspaces/task/app/.env").is_symlink())
+
 
 if __name__ == "__main__":
     unittest.main()
