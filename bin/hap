@@ -70,6 +70,25 @@ safe_destination() {
   done
 }
 
+ignore_generated_path() {
+  local repo="$1" relative="$2" exclude pattern
+  [[ "$relative" != *$'\n'* && "$relative" != *$'\r'* ]] || {
+    log_err "State paths cannot contain line breaks: $relative"; return 1;
+  }
+  if git -C "$repo" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
+    log_err "Refusing to replace tracked state: $relative"
+    return 1
+  fi
+  exclude=$(git -C "$repo" rev-parse --path-format=absolute --git-path info/exclude) || return 1
+  [[ ! -L "$exclude" ]] || return 1
+  pattern="${relative//\\/\\\\}"
+  pattern="${pattern//\*/\\*}"; pattern="${pattern//\?/\\?}"
+  pattern="${pattern//\[/\\[}"; pattern="${pattern//\]/\\]}"
+  pattern="${pattern// /\\ }"
+  mkdir -p "${exclude%/*}" || return 1
+  grep -Fxq -- "/$pattern" "$exclude" 2>/dev/null || printf '\n/%s\n' "$pattern" >> "$exclude"
+}
+
 # Directories to exclude when scanning for state files
 STATE_EXCLUDE_DIRS="node_modules vendor .git dist build"
 
@@ -105,6 +124,7 @@ extract_shared_state() {
       -o \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -type f -print
   ) | while IFS= read -r file; do
     local clean_file="${file#./}"
+    git -C "$repo_path" check-ignore --quiet -- "$clean_file" || continue
     local dest_file="$dest_dir/$clean_file"
     init_mkdir "$(dirname "$dest_file")" || return 1
     init_move "$repo_path/$clean_file" "$dest_file" || return 1
@@ -128,6 +148,7 @@ extract_data_state() {
       -o -name '*.db-journal' -o -name '*.sqlite-journal' -o -name '*.sqlite3-journal' -o -name '*.log' \) -type f -print
   ) | while IFS= read -r file; do
     local clean_file="${file#./}"
+    git -C "$repo_path" check-ignore --quiet -- "$clean_file" || continue
     local dest_file="$dest_dir/$clean_file"
     init_mkdir "$(dirname "$dest_file")" || return 1
     init_move "$repo_path/$clean_file" "$dest_file" || return 1
@@ -552,6 +573,7 @@ create_workspace() {
               local dest_dir=$(dirname "$dest_file")
 
               safe_destination "$target_ws/$repo_name" "$clean_file" || exit 1
+              ignore_generated_path "$target_ws/$repo_name" "$clean_file" || exit 1
               if [[ -e "$dest_file" ]]; then
                 log_err "State destination already exists: $dest_file"
                 exit 1

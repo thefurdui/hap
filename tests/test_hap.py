@@ -250,6 +250,24 @@ class HapTests(unittest.TestCase):
         for name in names:
             self.assertEqual((self.project / "data/app" / name).read_text(), name)
 
+    def test_init_keeps_tracked_state_examples_in_git(self):
+        self.repo(self.project, {".env.example": "example", "fixture.sqlite": "fixture"})
+        self.hap("init", "app")
+        self.assertEqual((self.project / "sources/app/.env.example").read_text(), "example")
+        self.assertFalse((self.project / "shared/app/.env.example").exists())
+        self.assertFalse((self.project / "data/app/fixture.sqlite").exists())
+
+    def test_generated_state_is_not_staged(self):
+        self.repo(files={"file.txt": "x"})
+        shared = self.project / "shared/app"
+        shared.mkdir(parents=True)
+        (shared / ".env").write_text("config")
+        self.register()
+        self.hap("open", "project", "task")
+        work = self.project / "workspaces/task/app"
+        self.git(work, "add", ".")
+        self.assertEqual(self.git(work, "ls-files", ".env").stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()
