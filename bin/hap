@@ -33,6 +33,27 @@ log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
 
 # --- HELPERS ---
 
+validate_name() {
+  [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] && return 0
+  log_err "Invalid $2: $1 (use letters, digits, dots, underscores, or hyphens)"
+  return 1
+}
+
+validate_project_root() {
+  local root="$1" part
+  [[ "$root" == /* && -d "$root" ]] || { log_err "Invalid project root: $root"; return 1; }
+  for part in sources workspaces shared data config; do
+    [[ ! -L "$root/$part" ]] || { log_err "Refusing symlinked project directory: $part"; return 1; }
+  done
+}
+
+validate_workspace_path() {
+  local root="$1" name="$2"
+  validate_name "$name" workspace || return 1
+  validate_project_root "$root" || return 1
+  [[ ! -L "$root/workspaces/$name" ]] || { log_err "Refusing symlinked workspace: $name"; return 1; }
+}
+
 # Directories to exclude when scanning for state files
 STATE_EXCLUDE_DIRS="node_modules vendor .git dist build"
 
@@ -242,6 +263,7 @@ cleanup_project_workspaces() {
   local task="$2"
   local sources_dir="$project_root/sources"
   local workspaces_dir="$project_root/workspaces"
+  validate_project_root "$project_root" || return 1
 
   [[ ! -d "$workspaces_dir" ]] && return
 
@@ -259,6 +281,7 @@ cleanup_project_workspaces() {
   local delete_remote="$DELETE_REMOTE"
 
   if [[ -n "$task" ]]; then
+    validate_workspace_path "$project_root" "$task" || return 1
     # TARGETED CLEANUP: TRUST THE USER
     local ws_path="$workspaces_dir/$task"
     log_info "Cleaning workspace: $task"
@@ -273,6 +296,7 @@ cleanup_project_workspaces() {
     for ws_path in "$workspaces_dir"/*; do
       [[ ! -d "$ws_path" ]] && continue
       local ws_name=$(basename "$ws_path")
+      validate_workspace_path "$project_root" "$ws_name" || return 1
       [[ "$ws_name" == "main" ]] && continue
 
       local is_active=0
@@ -355,7 +379,10 @@ resolve_layout_file() {
   local config_dir="$project_root/config"
 
   if [[ -n "$profile" ]]; then
+    validate_name "$profile" profile || return 1
+    [[ ! -L "$config_dir" && ! -L "$config_dir/profiles" ]] || return 1
     local candidate="$config_dir/profiles/${profile}.kdl"
+    [[ ! -L "$candidate" ]] || { log_err "Refusing symlinked profile: $profile"; return 1; }
     if [[ ! -f "$candidate" ]]; then
       log_err "Profile not found: $profile"
       log_err "Expected: $candidate"
@@ -461,6 +488,7 @@ create_workspace() {
 
   local sources_dir="$project_root/sources"
   local target_ws="$project_root/workspaces/$agent_task"
+  validate_workspace_path "$project_root" "$agent_task" || return 1
 
   if [[ -d "$target_ws" ]]; then
     log_warn "Resuming existing workspace: $agent_task"
@@ -548,6 +576,7 @@ create_workspace() {
 hap_init() {
   local project_name="${1:-$(basename "$(pwd)")}"
   local project_root="$(pwd)"
+  validate_name "$project_name" project || return 1
 
   # Guard: already initialized
   if [[ -d "$project_root/sources" ]]; then
@@ -819,12 +848,16 @@ hap_open() {
 
   ensure_setup "$editor"
 
+  validate_name "$project" project || return 1
+
   local path_to_root
   path_to_root=$(grep "^${project}|" "$DB_FILE" | cut -d '|' -f 2 || true)
   if [[ -z "$path_to_root" ]]; then
     log_err "Project not found: $project"
     exit 1
   fi
+
+  validate_project_root "$path_to_root" || return 1
 
   if [[ "$list_profiles" == true ]]; then
     if list_project_profiles "$path_to_root"; then
@@ -849,6 +882,7 @@ hap_open() {
 hap_add() {
   local name="${1:?'Project name required. Usage: hap add <name> [path]'}"
   local path="${2:-.}"
+  validate_name "$name" project || return 1
 
   ensure_db
 
@@ -869,6 +903,7 @@ hap_add() {
 
 hap_remove() {
   local name="${1:?'Project name required. Usage: hap remove <name>'}"
+  validate_name "$name" project || return 1
 
   ensure_db
 
@@ -924,6 +959,7 @@ hap_clean() {
     exit 1
   fi
 
+  validate_name "$project" project || return 1
   ensure_db
 
   local path_to_root
