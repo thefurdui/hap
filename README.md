@@ -131,7 +131,7 @@ Project mutations are serialized with `.hap-lock/`. If a process was killed, ins
 
 Existing Zellij sessions are attached or resurrected without deleting saved session state. Profiles and `-u` affect a newly created session; they do not replace an existing session's layout or restart its servers. Stop and start servers from their panes.
 
-Session names use `hap-<workspace>-<path-hash>`, derived from the canonical project path and workspace name. All aliases for one project reach the same session, and ambiguous alias/workspace combinations stay separate. Moving a project changes its session identity.
+Session names use `h-<path-hash>`, derived from the canonical project path and workspace name. The fixed 18-byte name fits macOS's default Zellij socket path budget even with long workspace names. All aliases for one project reach the same session, and ambiguous alias/workspace combinations stay separate. Moving a project changes its session identity. Existing v1.2.0 `hap-<workspace>-<path-hash>` sessions are still attached and protected during cleanup.
 
 The distributed template uses Bash shells and no hardcoded repository names, editors, agents, or optional Git UI. Customize pane `cwd` and `command` properties for your project. Named profiles live in `config/profiles/`; profile names cannot escape that directory.
 

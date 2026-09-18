@@ -194,7 +194,8 @@ workspace_session_name() {
   root=$(cd -- "$1" && pwd -P) || return 1
   digest=$(printf '%s\0%s\0' "$root" "$workspace" |
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE GIT_DEFAULT_HASH=sha1 git -C / hash-object --stdin) || return 1
-  printf 'hap-%s-%s\n' "$workspace" "${digest:0:16}"
+  # macOS's default socket directory leaves only 24 bytes for a session name.
+  printf 'h-%s\n' "${digest:0:16}"
 }
 
 # Return 0 if any name is active/resumable, 1 if absent, 2 if unknown.
@@ -224,7 +225,7 @@ workspace_is_active() {
   [[ ! -e "$ws_path/$GUI_LOCK_FILE" && ! -e "$ws_path/.hap-opening" ]] || return 0
   root=$(cd -- "$ws_path/../.." && pwd -P) || return 2
   session=$(workspace_session_name "$root" "${ws_path##*/}") || return 2
-  names+=("$session")
+  names+=("$session" "hap-${ws_path##*/}-${session#h-}")
   # Preserve pre-v1.2 sessions opened through any registered alias of this root.
   registry_validate || return 2
   while IFS='|' read -r alias registered; do
@@ -526,7 +527,13 @@ launch_session() {
       log_info "Layout profile: $profile"
     fi
 
-    local args=()
+    local args=() previous_name="hap-${workspace_path##*/}-${session_name#h-}"
+    # Retain sessions created by v1.2.0 on systems with longer socket budgets.
+    if zellij_session_exists "$previous_name"; then
+      session_name="$previous_name"
+    else
+      [[ $? -eq 1 ]] || return 1
+    fi
     if zellij_session_exists "$session_name"; then
       args+=(attach "$session_name")
     else

@@ -518,7 +518,7 @@ class HapTests(unittest.TestCase):
         self.workspace()
         self.hap("open", "project", "task")
         session = (self.base / "commands.log").read_text().split()[-1]
-        self.assertRegex(session, r"^hap-task-[0-9a-f]{16}$")
+        self.assertRegex(session, r"^h-[0-9a-f]{16}$")
         self.env["HAP_TEST_SESSIONS"] = session
         self.hap("open", "project", "task")
         commands = (self.base / "commands.log").read_text()
@@ -551,6 +551,24 @@ class HapTests(unittest.TestCase):
         self.hap("open", "project-two", "task")
         sessions = [line.split()[-1] for line in (self.base / "commands.log").read_text().splitlines()]
         self.assertNotEqual(sessions[0], sessions[1])
+
+    def test_session_names_fit_macos_socket_budget_for_long_workspaces(self):
+        self.repo()
+        self.register()
+        self.hap("open", "project", "workspace-" + "long" * 20)
+        session = (self.base / "commands.log").read_text().split()[-1]
+        self.assertLess(78 + 1 + len(session.encode()), 104)
+
+    def test_v120_path_sessions_remain_attached_and_protected(self):
+        _, work = self.workspace()
+        self.hap("open", "project", "task")
+        short = (self.base / "commands.log").read_text().split()[-1]
+        previous = "hap-task-" + short.removeprefix("h-")
+        self.env["HAP_TEST_SESSIONS"] = previous
+        self.hap("open", "project", "task")
+        self.assertIn(f"attach {previous}", (self.base / "commands.log").read_text())
+        self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
+        self.assertTrue(work.exists())
 
     def test_gui_markers_are_removed_on_failure(self):
         _, work = self.workspace()
