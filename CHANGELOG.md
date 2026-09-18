@@ -35,4 +35,5 @@ See [Upgrading from v1.1](README.md#upgrading-from-v11) for migration steps.
 - Preserve saved Zellij sessions; wait for GUI editors and provide `hap unlock` for stale markers with live-owner checks.
 - Preserve filename boundaries during discovery and propagate traversal failures. Report unsupported state filenames explicitly.
 - Add integration regressions, Bash syntax checks, ShellCheck, release consistency checks, and Linux/macOS CI.
+- Make `VERSION` authoritative, synchronize standalone release files with `make release-prepare`, and validate annotated release tags against the version and commit in CI.
 - Rewrite help, lifecycle documentation, recovery guidance, and the generic layout to match the implemented behavior.

@@ -33,12 +33,15 @@ lint:
 	bash -n bin/hap install.sh
 	shellcheck bin/hap install.sh
 
-checksums:
+release-prepare checksums:
 	python3 scripts/release_checks.py --write
 
 check-release:
 	python3 scripts/release_checks.py
 
+check-tag:
+	python3 scripts/release_checks.py --tag "v$$(cat VERSION)"
+
 check: lint check-release test
 
-.PHONY: all install uninstall test lint checksums check-release check
+.PHONY: all install uninstall test lint release-prepare checksums check-release check-tag check

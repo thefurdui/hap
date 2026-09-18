@@ -21,7 +21,7 @@ make install
 
 `make install` defaults to `~/.local/bin/hap` and `${XDG_DATA_HOME:-$HOME/.local/share}/hap/templates/`. Override `PREFIX`, `BINDIR`, or `DATADIR` as needed. Add the executable directory to PATH. `make uninstall` removes only the executable and distributed template; it keeps the project registry and project files.
 
-The release downloader is also available as `bash install.sh` from a reviewed checkout. It defaults to `v1.2.0`, requires HTTPS and successful HTTP responses, verifies `SHA256SUMS`, and stages both files before replacement. Set `HAP_INSTALL_REF` to a released version tag or a full commit SHA; use `HAP_BIN_DIR` and `HAP_DATA_DIR` to override installation destinations. The checksum manifest and installer share the repository's trust boundary; checksums are not an independent signature against a compromised publisher.
+The release downloader is also available as `bash install.sh` from a reviewed checkout. It defaults to that checkout's release tag, requires HTTPS and successful HTTP responses, verifies `SHA256SUMS`, and stages both files before replacement. Set `HAP_INSTALL_REF` to a released version tag or a full commit SHA; use `HAP_BIN_DIR` and `HAP_DATA_DIR` to override installation destinations. The checksum manifest and installer share the repository's trust boundary; checksums are not an independent signature against a compromised publisher.
 
 ## Project structure
 
@@ -190,7 +190,7 @@ The registry is `${XDG_DATA_HOME:-$HOME/.local/share}/hap/projects.csv`, with li
 
 `make check` runs Bash syntax checks, ShellCheck, release consistency checks, and Python unittest integration tests. Tests use temporary projects, local bare remotes, and stubbed editors/installers; they do not operate on your real workspaces or publish to external remotes. CI runs the same checks on Linux and macOS.
 
-After changing `bin/hap` or `templates/hap.kdl`, run `make checksums` and commit `SHA256SUMS` with the change. Release checks require the executable version, installer's default tag, changelog entry, and downloadable file hashes to agree.
+`VERSION` is the authoritative release number. `make release-prepare` synchronizes the executable's embedded version, installer default, installation example, and checksums from it; `make checksums` is an alias. Commit the resulting files together. Release checks reject drift, and tag builds also require an annotated `v<VERSION>` tag pointing at the release commit. See the [versioning and release workflow](docs/releases.md) for version selection and tagging.
 
 The [implementation record](docs/v1.2.0-work.md) maps all 32 review findings to the changes. Python and ShellCheck are development dependencies, not runtime dependencies of hap.
 

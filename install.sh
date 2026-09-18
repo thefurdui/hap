@@ -3,6 +3,7 @@ set -euo pipefail
 ((BASH_VERSINFO[0] >= 4)) || { printf 'Install Bash 4 or newer first\n' >&2; exit 1; }
 
 # Select a release tag or an immutable commit. Never mix files from mutable main.
+# Generated from VERSION by make release-prepare.
 REF="${HAP_INSTALL_REF:-v1.2.0}"
 [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$REF" =~ ^[0-9a-f]{40}$ ]] || {
   printf 'Invalid HAP_INSTALL_REF: %s\n' "$REF" >&2; exit 1;
