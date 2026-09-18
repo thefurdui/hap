@@ -626,6 +626,19 @@ class HapTests(unittest.TestCase):
         self.assertEqual(executable.read_text(), "old executable")
         self.assertEqual(layout.read_text(), "old layout")
 
+    def test_registry_refuses_symlinks_and_directories(self):
+        db = self.register()
+        db.unlink()
+        outside = self.base / "outside-registry"
+        outside.write_text("keep private contents")
+        db.symlink_to(outside)
+        self.assertNotEqual(self.hap("add", "app", self.project, check=False).returncode, 0)
+        self.assertEqual(outside.read_text(), "keep private contents")
+        db.unlink()
+        db.mkdir()
+        self.assertNotEqual(self.hap("add", "app", self.project, check=False).returncode, 0)
+        self.assertEqual(list(db.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

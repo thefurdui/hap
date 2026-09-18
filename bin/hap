@@ -398,8 +398,12 @@ require_dependency_tools() {
 }
 
 ensure_db() {
-  mkdir -p "$DATA_DIR"
-  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE" || true
+  [[ "$DATA_DIR" == /* ]] || { log_err "XDG_DATA_HOME must be absolute"; return 1; }
+  mkdir -p "$DATA_DIR" || return 1
+  [[ ! -L "$DB_FILE" && ( ! -e "$DB_FILE" || -f "$DB_FILE" ) ]] || {
+    log_err "Registry must be a regular file: $DB_FILE"; return 1;
+  }
+  [[ -f "$DB_FILE" ]] || (umask 077; touch "$DB_FILE") || return 1
 }
 
 # --- SESSION LAUNCH ---
