@@ -348,6 +348,19 @@ class HapTests(unittest.TestCase):
         bad.mkdir()
         self.assertNotEqual(self.hap("add", "app", bad, check=False).returncode, 0)
 
+    def test_concurrent_registry_updates_preserve_all_entries(self):
+        processes = [subprocess.Popen([str(HAP), "add", f"app-{i}", str(self.project)],
+                                     cwd=self.project, env=self.env, text=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                     for i in range(8)]
+        for process in processes:
+            out, err = process.communicate(timeout=15)
+            self.assertEqual(process.returncode, 0, out + err)
+        db = Path(self.env["XDG_DATA_HOME"]) / "hap/projects.csv"
+        self.assertEqual({line.split("|")[0] for line in db.read_text().splitlines()},
+                         {f"app-{i}" for i in range(8)})
+        self.assertFalse((db.parent / ".registry.lock").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

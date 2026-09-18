@@ -924,10 +924,18 @@ registry_get() {
 }
 
 registry_rewrite() (
-  local name="$1" path="${2:-}" tmp_db
+  local name="$1" path="${2:-}" tmp_db="" lock="$DATA_DIR/.registry.lock" attempts=0
+  until mkdir -m 700 "$lock" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    [[ $attempts -lt 100 && ! -L "$lock" ]] || { log_err "Registry is busy: $lock"; return 1; }
+    sleep 0.05
+  done
+  trap '[[ -z "$tmp_db" ]] || rm -f "$tmp_db"; rmdir "$lock"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   registry_validate || return 1
-  tmp_db=$(mktemp) || return 1
-  trap 'rm -f "$tmp_db"' EXIT
+  [[ ! -L "$DB_FILE" ]] || { log_err "Refusing a symlinked registry"; return 1; }
+  tmp_db=$(mktemp "$DATA_DIR/.projects.XXXXXXXX") || return 1
   awk -F '|' -v key="$name" '$1 != key' "$DB_FILE" > "$tmp_db" || return 1
   [[ -z "$path" ]] || printf '%s|%s\n' "$name" "$path" >> "$tmp_db" || return 1
   mv "$tmp_db" "$DB_FILE"
