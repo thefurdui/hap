@@ -188,7 +188,9 @@ The registry is `${XDG_DATA_HOME:-$HOME/.local/share}/hap/projects.csv`, with li
 
 ## Development
 
-`make check` runs Bash syntax checks, ShellCheck, and Python unittest integration tests. Tests use temporary projects, local bare remotes, and stubbed editors/installers; they do not operate on your real workspaces or publish to external remotes. CI runs the same checks on Linux and macOS.
+`make check` runs Bash syntax checks, ShellCheck, release consistency checks, and Python unittest integration tests. Tests use temporary projects, local bare remotes, and stubbed editors/installers; they do not operate on your real workspaces or publish to external remotes. CI runs the same checks on Linux and macOS.
+
+After changing `bin/hap` or `templates/hap.kdl`, run `make checksums` and commit `SHA256SUMS` with the change. Release checks require the executable version, installer's default tag, changelog entry, and downloadable file hashes to agree.
 
 The [implementation record](docs/v1.2.0-work.md) maps all 32 review findings to the changes. Python and ShellCheck are development dependencies, not runtime dependencies of hap.
 

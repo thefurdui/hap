@@ -33,6 +33,12 @@ lint:
 	bash -n bin/hap install.sh
 	shellcheck bin/hap install.sh
 
-check: lint test
+checksums:
+	python3 scripts/release_checks.py --write
 
-.PHONY: all install uninstall test lint check
+check-release:
+	python3 scripts/release_checks.py
+
+check: lint check-release test
+
+.PHONY: all install uninstall test lint checksums check-release check

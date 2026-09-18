@@ -12,7 +12,7 @@ fi
 
 # --- CONFIG ---
 APP_NAME="hap"
-VERSION="1.1.0"
+VERSION="1.2.0"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_DIR="$XDG_DATA_HOME/$APP_NAME"
 DB_FILE="$DATA_DIR/projects.csv"
