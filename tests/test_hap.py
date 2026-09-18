@@ -361,6 +361,21 @@ class HapTests(unittest.TestCase):
                          {f"app-{i}" for i in range(8)})
         self.assertFalse((db.parent / ".registry.lock").exists())
 
+    def test_empty_sources_fail_before_workspace_creation(self):
+        (self.project / "sources").mkdir()
+        self.register()
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces").exists())
+
+    def test_linked_worktree_sources_are_rejected(self):
+        original = self.repo(self.base / "original")
+        source = self.project / "sources/linked"
+        source.parent.mkdir()
+        self.git(original, "worktree", "add", "-q", "-b", "linked", source)
+        self.register()
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

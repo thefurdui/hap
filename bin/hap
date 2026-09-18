@@ -546,18 +546,38 @@ with_project_lock() (
   "$@"
 )
 
+discover_sources() {
+  local root="$1" repo top
+  SOURCE_REPOS=()
+  [[ -d "$root/sources" && ! -L "$root/sources" ]] || { log_err "Missing sources directory"; return 1; }
+  for repo in "$root/sources"/* "$root/sources"/.[!.]* "$root/sources"/..?*; do
+    [[ -e "$repo" || -L "$repo" ]] || continue
+    validate_name "${repo##*/}" repository || return 1
+    [[ -d "$repo/.git" && ! -L "$repo" && ! -L "$repo/.git" ]] || {
+      log_err "Source must be a regular Git checkout, not a symlink, bare repo, or linked worktree: $repo"
+      return 1
+    }
+    top=$(git -C "$repo" rev-parse --show-toplevel) || return 1
+    [[ "$top" == "$(cd "$repo" && pwd -P)" ]] || return 1
+    git -C "$repo" rev-parse --verify HEAD >/dev/null || return 1
+    SOURCE_REPOS+=("$repo")
+  done
+  [[ ${#SOURCE_REPOS[@]} -gt 0 ]] || { log_err "No source repositories found"; return 1; }
+}
+
 prepare_workspace() {
   local project_root="$1" project_name="$2" agent_task="$3" base_branch="$4"
   local editor="$5" target_branch="$6"
   local sources_dir="$project_root/sources" target_ws="$project_root/workspaces/$agent_task"
   local repo repo_name work branch_name common
   validate_workspace_path "$project_root" "$agent_task" || return 1
+  discover_sources "$project_root" || return 1
   for meta in .hap-ready .hap-opening; do
     [[ ! -L "$target_ws/$meta" ]] || { log_err "Unsafe workspace metadata: $meta"; return 1; }
   done
   mkdir -p "$target_ws" || return 1
   rm -f "$target_ws/.hap-ready" || return 1
-  for repo in "$sources_dir"/*; do
+  for repo in "${SOURCE_REPOS[@]}"; do
     repo_name="${repo##*/}"
     work="$target_ws/$repo_name"
     if [[ -d "$repo/.git" && ! -L "$repo" ]]; then
@@ -573,8 +593,6 @@ prepare_workspace() {
         git -C "$work" push -u origin "$branch_name" || true
       fi
       setup_workspace_repo "$project_root" "$target_ws" "$repo_name" || return 1
-    else
-      [[ -e "$work" || -L "$work" ]] || ln -s "$repo" "$work" || return 1
     fi
   done
   printf '1\n' > "$target_ws/.hap-ready" || return 1
@@ -694,6 +712,7 @@ hap_init() (
   }
   local root_repo=false
   local -a repos=() branches=() shared_reports=() data_reports=()
+  [[ ! -f "$project_root/.git" && ! -L "$project_root/.git" ]] || { log_err "Init requires an ordinary Git checkout"; return 1; }
   if [[ -d "$project_root/.git" ]]; then
     root_repo=true
     repos+=("$project_name")
@@ -702,6 +721,7 @@ hap_init() (
       [[ ! -e "$item" && ! -L "$item" ]] || { log_err "Reserved directory already exists: $item"; return 1; }
     done
     for item in "$project_root"/*; do
+      [[ ! -f "$item/.git" && ! -L "$item/.git" ]] || { log_err "Linked repositories are not supported by init: $item"; return 1; }
       [[ -d "$item/.git" && ! -L "$item" ]] || continue
       name="${item##*/}"
       validate_name "$name" repository || return 1
