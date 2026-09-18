@@ -225,6 +225,20 @@ class HapTests(unittest.TestCase):
         self.assertFalse((self.project / "sources").exists())
         self.assertEqual(self.git(self.project, "branch", "--show-current").stdout.strip(), "dev")
 
+    def test_init_refuses_local_work_before_migration(self):
+        self.repo(self.project)
+        (self.project / "file.txt").write_text("my edits")
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertEqual((self.project / "file.txt").read_text(), "my edits")
+        self.assertTrue((self.project / ".git").exists())
+        self.git(self.project, "restore", "file.txt")
+        (self.project / "notes.txt").write_text("untracked")
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        (self.project / "notes.txt").unlink()
+        (self.project / "ignored.txt").write_text("ignored work")
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertFalse((self.project / "sources").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

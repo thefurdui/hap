@@ -705,6 +705,18 @@ hap_init() (
     branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || {
       log_err "Check out a branch before initialization: $repo"; return 1;
     }
+    local dirty ignored
+    dirty=$(git -C "$repo" status --porcelain --untracked-files=all) || return 1
+    [[ -z "$dirty" ]] || {
+      log_err "Commit or preserve local changes and untracked files before init: $repo"
+      return 1
+    }
+    while IFS= read -r -d '' ignored; do
+      case "${ignored##*/}" in
+        .env|.env.*|*.pem|*.crt|*.key|*.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal|*.log) ;;
+        *) log_err "Preserve or remove ignored files before init: $repo/$ignored"; return 1 ;;
+      esac
+    done < <(git -C "$repo" ls-files --others --ignored --exclude-standard -z)
     branches+=("$branch")
   done
 
