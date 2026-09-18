@@ -11,16 +11,18 @@ all:
 
 # Install target
 install:
-	@mkdir -p $(BINDIR)
-	@mkdir -p $(DATADIR)/templates
-	@install -m 755 $(SCRIPT) $(BINDIR)/hap
-	@cp $(TEMPLATE) $(DATADIR)/templates/hap.kdl
+	@test -n "$(BINDIR)" && test "$(BINDIR)" != / && test -n "$(DATADIR)" && test "$(DATADIR)" != /
+	@mkdir -p "$(BINDIR)"
+	@mkdir -p "$(DATADIR)/templates"
+	@install -m 755 "$(SCRIPT)" "$(BINDIR)/hap"
+	@install -m 644 "$(TEMPLATE)" "$(DATADIR)/templates/hap.kdl"
 	@echo "✅ Installed hap to $(BINDIR)/hap"
 
 # Uninstall target
 uninstall:
-	@rm -f $(BINDIR)/hap
-	@rm -rf $(DATADIR)/templates
+	@test -n "$(BINDIR)" && test "$(BINDIR)" != / && test -n "$(DATADIR)" && test "$(DATADIR)" != /
+	@rm -f "$(BINDIR)/hap" "$(DATADIR)/templates/hap.kdl"
+	@rmdir "$(DATADIR)/templates" 2>/dev/null || true
 	@echo "🗑️  Uninstalled hap"
 
 .PHONY: all install uninstall

@@ -448,6 +448,16 @@ class HapTests(unittest.TestCase):
         self.assertEqual((Path(self.env["HAP_DATA_DIR"]) / "templates/hap.kdl").read_bytes(),
                          (ROOT / "templates/hap.kdl").read_bytes())
 
+    def test_make_handles_spaces_and_preserves_unowned_files(self):
+        prefix = self.base / "install with spaces"
+        args = [f"BINDIR={prefix}/bin", f"DATADIR={prefix}/data"]
+        self.run_cmd(["make", "install", *args], cwd=ROOT)
+        sentinel = prefix / "data/templates/unowned"
+        sentinel.write_text("keep")
+        self.run_cmd(["make", "uninstall", *args], cwd=ROOT)
+        self.assertFalse((prefix / "bin/hap").exists())
+        self.assertEqual(sentinel.read_text(), "keep")
+
 
 if __name__ == "__main__":
     unittest.main()
