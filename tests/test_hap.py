@@ -328,6 +328,26 @@ class HapTests(unittest.TestCase):
         self.hap("open", "project", "task")
         self.assertTrue((work / ".hap-ready").exists())
 
+    def test_registry_sole_entry_upsert_and_remove(self):
+        self.hap("add", "app", self.project)
+        self.hap("add", "app", self.project)
+        self.hap("remove", "app")
+        db = Path(self.env["XDG_DATA_HOME"]) / "hap/projects.csv"
+        self.assertEqual(db.read_text(), "")
+
+    def test_registry_matches_names_literally(self):
+        self.hap("add", "axb", self.project)
+        self.hap("add", "a.b", self.project)
+        self.hap("remove", "a.b")
+        db = Path(self.env["XDG_DATA_HOME"]) / "hap/projects.csv"
+        self.assertIn("axb|", db.read_text())
+        self.assertNotIn("a.b|", db.read_text())
+
+    def test_registry_rejects_delimiter_paths(self):
+        bad = self.base / "bad|path"
+        bad.mkdir()
+        self.assertNotEqual(self.hap("add", "app", bad, check=False).returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

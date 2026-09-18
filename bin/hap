@@ -869,7 +869,7 @@ hap_open() {
   validate_name "$project" project || return 1
 
   local path_to_root
-  path_to_root=$(grep "^${project}|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  path_to_root=$(registry_get "$project") || return 1
   if [[ -z "$path_to_root" ]]; then
     log_err "Project not found: $project"
     exit 1
@@ -897,43 +897,58 @@ hap_open() {
   fi
 }
 
+registry_validate() {
+  local name path row seen=$'\n'
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] || continue
+    [[ "$row" == *'|'* && "${row#*|}" != *'|'* ]] || { log_err "Invalid registry delimiter"; return 1; }
+    name="${row%%|*}"; path="${row#*|}"
+    validate_name "$name" project || return 1
+    [[ "$path" == /* && "$path" != *$'\r'* ]] || { log_err "Invalid registry row for $name"; return 1; }
+    [[ "$seen" != *$'\n'"$name"$'\n'* ]] || { log_err "Duplicate project: $name"; return 1; }
+    seen+="$name"$'\n'
+  done < "$DB_FILE"
+}
+
+registry_get() {
+  local wanted="$1" name path
+  registry_validate || return 1
+  while IFS='|' read -r name path || [[ -n "$name" ]]; do
+    if [[ "$name" == "$wanted" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done < "$DB_FILE"
+  log_err "Project not found: $wanted"
+  return 1
+}
+
+registry_rewrite() (
+  local name="$1" path="${2:-}" tmp_db
+  registry_validate || return 1
+  tmp_db=$(mktemp) || return 1
+  trap 'rm -f "$tmp_db"' EXIT
+  awk -F '|' -v key="$name" '$1 != key' "$DB_FILE" > "$tmp_db" || return 1
+  [[ -z "$path" ]] || printf '%s|%s\n' "$name" "$path" >> "$tmp_db" || return 1
+  mv "$tmp_db" "$DB_FILE"
+)
+
 hap_add() {
-  local name="${1:?'Project name required. Usage: hap add <name> [path]'}"
-  local path="${2:-.}"
+  local name="${1:?'Project name required. Usage: hap add <name> [path]'}" path="${2:-.}" full_path
   validate_name "$name" project || return 1
-
-  ensure_db
-
-  local full_path
-  [[ "$path" == "." ]] && full_path="$(pwd)" || full_path="$(cd "$path" && pwd)"
-
-  # Upsert: remove old entry if exists
-  if grep -q "^${name}|" "$DB_FILE" 2>/dev/null; then
-    local tmp_db
-    tmp_db=$(mktemp)
-    grep -v "^${name}|" "$DB_FILE" >"$tmp_db"
-    mv "$tmp_db" "$DB_FILE"
-  fi
-
-  echo "$name|$full_path" >>"$DB_FILE"
+  full_path=$(cd -- "$path" && pwd -P) || return 1
+  case "$full_path" in *'|'*|*$'\n'*|*$'\r'*) log_err "Project paths cannot contain pipes or line breaks"; return 1 ;; esac
+  ensure_db || return 1
+  registry_rewrite "$name" "$full_path" || return 1
   log_succ "Registered: $name → $full_path"
 }
 
 hap_remove() {
   local name="${1:?'Project name required. Usage: hap remove <name>'}"
   validate_name "$name" project || return 1
-
-  ensure_db
-
-  if ! grep -q "^${name}|" "$DB_FILE" 2>/dev/null; then
-    log_err "Project not found: $name"
-    exit 1
-  fi
-
-  local tmp_db
-  tmp_db=$(mktemp)
-  grep -v "^${name}|" "$DB_FILE" >"$tmp_db"
-  mv "$tmp_db" "$DB_FILE"
+  ensure_db || return 1
+  registry_get "$name" >/dev/null || return 1
+  registry_rewrite "$name" || return 1
   log_succ "Removed: $name"
 }
 
@@ -981,7 +996,7 @@ hap_clean() {
   ensure_db
 
   local path_to_root
-  path_to_root=$(grep "^${project}|" "$DB_FILE" | cut -d '|' -f 2 || true)
+  path_to_root=$(registry_get "$project") || return 1
   if [[ -z "$path_to_root" ]]; then
     log_err "Project not found: $project"
     exit 1
