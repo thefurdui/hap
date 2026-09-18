@@ -591,6 +591,41 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("open", "project", "task", "--install", check=False).returncode, 0)
         self.assertFalse((self.project / "workspaces").exists())
 
+    def test_init_rolls_back_after_config_was_provisioned(self):
+        first = self.repo(self.project / "a")
+        second = self.repo(self.project / "b")
+        (first / ".env").write_text("first config")
+        (second / ".env").write_text("second config")
+        self.stub("git", f'case "$2" in */sources/b) if [ "$3" = worktree ] && [ "$4" = add ]; then exit 42; fi ;; esac\nexec "{GIT}" "$@"')
+        result = self.hap("init", "app", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((first / ".env").read_text(), "first config")
+        self.assertEqual((second / ".env").read_text(), "second config")
+        self.assertFalse((self.project / ".hap-init-journal").exists())
+        self.assertFalse((self.project / "sources").exists())
+        self.assertEqual(self.git(first, "branch", "--show-current").stdout.strip(), "dev")
+
+    def test_remote_delete_refuses_unpreserved_remote_tip(self):
+        source, work = self.workspace()
+        self.git(work, "push", "-qu", "origin", "hap/task")
+        tip = self.git(work, "rev-parse", "HEAD").stdout.strip()
+        remote_tip = self.git(source, "commit-tree", "HEAD^{tree}", "-p", tip, "-m", "remote-only").stdout.strip()
+        self.git(source, "push", "-q", "origin", f"{remote_tip}:refs/heads/hap/task")
+        self.assertNotEqual(self.hap("clean", "project", "task", "-D", "-y", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
+    def test_installer_rolls_back_pair_on_second_replacement_failure(self):
+        _, executable = self.installer_fixture()
+        layout = Path(self.env["HAP_DATA_DIR"]) / "templates/hap.kdl"
+        layout.parent.mkdir(parents=True)
+        layout.write_text("old layout")
+        self.env["HAP_TEST_LAYOUT"] = str(layout)
+        self.env["HAP_TEST_MV_FAILED"] = str(self.base / "move-failed")
+        self.stub("mv", f'for arg in "$@"; do target="$arg"; done\nif [ "$target" = "$HAP_TEST_LAYOUT" ] && [ ! -e "$HAP_TEST_MV_FAILED" ]; then touch "$HAP_TEST_MV_FAILED"; exit 1; fi\nexec "{shutil.which("mv")}" "$@"')
+        self.assertNotEqual(self.run_cmd(["bash", ROOT / "install.sh"], check=False).returncode, 0)
+        self.assertEqual(executable.read_text(), "old executable")
+        self.assertEqual(layout.read_text(), "old layout")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,15 +25,12 @@ BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
 NC='\033[0m'
 
-log_info() { echo -e "${BLUE}INFO:${NC} $1"; }
-log_succ() { echo -e "${GREEN}OK:${NC}   $1"; }
-log_warn() { echo -e "${YELLOW}WARN:${NC} $1"; }
-log_err() { echo -e "${RED}ERR:${NC}  $1" >&2; }
+log_info() { printf '%bINFO:%b %s\n' "$BLUE" "$NC" "$1"; }
+log_succ() { printf '%bOK:%b   %s\n' "$GREEN" "$NC" "$1"; }
+log_warn() { printf '%bWARN:%b %s\n' "$YELLOW" "$NC" "$1"; }
+log_err() { printf '%bERR:%b  %s\n' "$RED" "$NC" "$1" >&2; }
 
 # --- HELPERS ---
 
@@ -46,6 +43,7 @@ validate_name() {
 validate_project_root() {
   local root="$1" part
   [[ "$root" == /* && -d "$root" ]] || { log_err "Invalid project root: $root"; return 1; }
+  [[ ! -e "$root/.hap-init-journal" ]] || { log_err "Initialization is incomplete; recover it before workspace operations"; return 1; }
   for part in sources workspaces shared data config; do
     [[ ! -L "$root/$part" ]] || { log_err "Refusing symlinked project directory: $part"; return 1; }
   done
@@ -127,72 +125,44 @@ preflight_ignored_state() {
   esac
 }
 
-# Directories to exclude when scanning for state files
-STATE_EXCLUDE_DIRS="node_modules vendor .git dist build"
-
-# Build find exclusion arguments from the directory list
-_build_find_excludes() {
-  local args=()
-  local first=true
-  for dir in $STATE_EXCLUDE_DIRS; do
-    if [[ "$first" == true ]]; then
-      args+=("-name" "$dir")
-      first=false
+# One traversal policy serves both kinds of extracted, ignored state.
+extract_state() {
+  local repo_path="$1" dest_dir="$2" kind="$3" pattern directory
+  local -a patterns=() excludes=() matches=()
+  case "$kind" in
+    config) patterns=(.env '.env.*' '*.pem' '*.crt' '*.key') ;;
+    data) patterns=('*.db' '*.sqlite' '*.sqlite3' '*.db-wal' '*.sqlite-wal' '*.sqlite3-wal'
+                    '*.db-shm' '*.sqlite-shm' '*.sqlite3-shm' '*.db-journal' '*.sqlite-journal' '*.sqlite3-journal' '*.log') ;;
+    *) return 1 ;;
+  esac
+  for directory in node_modules vendor .git dist build; do
+    [[ ${#excludes[@]} -eq 0 ]] || excludes+=(-o)
+    excludes+=(-name "$directory")
+  done
+  for pattern in "${patterns[@]}"; do
+    [[ ${#matches[@]} -eq 0 ]] || matches+=(-o)
+    matches+=(-name "$pattern")
+  done
+  (
+    cd "$repo_path" || exit 1
+    find . \( "${excludes[@]}" \) -prune -o \( "${matches[@]}" \) -type f -print0
+  ) | while IFS= read -r -d '' file; do
+    local relative="${file#./}" dest
+    if git -C "$repo_path" check-ignore --quiet -- "$relative"; then
+      :
     else
-      args+=("-o" "-name" "$dir")
+      [[ $? -eq 1 ]] || return 1
+      continue
     fi
-  done
-  # Return: \( -name node_modules -o -name vendor ... \) -prune
-  echo "(" "${args[@]}" ")" "-prune"
-}
-
-# Extract shared config files (.env, .pem, .crt, .key) preserving directory structure.
-# Args: <repo_source_path> <shared_dest_dir>
-# Populates the global SHARED_MOVED array with "<relative_path>" entries.
-SHARED_MOVED=()
-extract_shared_state() {
-  local repo_path="$1"
-  local dest_dir="$2"
-
-  SHARED_MOVED=()
-  (
-    cd "$repo_path" || return
-    # Find config files, excluding build/vendor dirs
-    find . \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name build \) -prune \
-      -o \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -type f -print0
-  ) | while IFS= read -r -d '' file; do
-    local clean_file="${file#./}"
-    git -C "$repo_path" check-ignore --quiet -- "$clean_file" || continue
-    local dest_file="$dest_dir/$clean_file"
-    init_mkdir "$(dirname "$dest_file")" || return 1
-    init_move "$repo_path/$clean_file" "$dest_file" || return 1
-    printf '%s\n' "$clean_file"
+    dest="$dest_dir/$relative"
+    init_mkdir "${dest%/*}" || return 1
+    init_move "$repo_path/$relative" "$dest" || return 1
+    printf '%s\n' "$relative"
   done
 }
 
-# Extract mutating data files (.db, .sqlite, .log, WAL) preserving directory structure.
-# Args: <repo_source_path> <data_dest_dir>
-# Outputs moved file paths to stdout (one per line).
-extract_data_state() {
-  local repo_path="$1"
-  local dest_dir="$2"
-
-  (
-    cd "$repo_path" || return
-    find . \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name build \) -prune \
-      -o \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \
-      -o -name '*.db-wal' -o -name '*.sqlite-wal' -o -name '*.sqlite3-wal' \
-      -o -name '*.db-shm' -o -name '*.sqlite-shm' -o -name '*.sqlite3-shm' \
-      -o -name '*.db-journal' -o -name '*.sqlite-journal' -o -name '*.sqlite3-journal' -o -name '*.log' \) -type f -print0
-  ) | while IFS= read -r -d '' file; do
-    local clean_file="${file#./}"
-    git -C "$repo_path" check-ignore --quiet -- "$clean_file" || continue
-    local dest_file="$dest_dir/$clean_file"
-    init_mkdir "$(dirname "$dest_file")" || return 1
-    init_move "$repo_path/$clean_file" "$dest_file" || return 1
-    printf '%s\n' "$clean_file"
-  done
-}
+extract_shared_state() { extract_state "$1" "$2" config; }
+extract_data_state() { extract_state "$1" "$2" data; }
 
 # Print a highly visible summary block of what was moved during init.
 # Args: <repo_name> <shared_files_string> <data_files_string> <project_root>
@@ -252,7 +222,7 @@ branch_is_protected() {
 
 cleanup_workspace() {
   local ws_path="$1" sources_dir="$2" delete_remote="${4:-false}"
-  local repo source_repo repo_name status tip branch common git_dir remote_tip ignored manifest path kind value
+  local repo source_repo repo_name status tip branch common git_dir remote_tip manifest
   local -a repos=() branches=() tips=()
   [[ -d "$ws_path" ]] || { log_err "Workspace not found: $ws_path"; return 1; }
 
@@ -367,7 +337,7 @@ cleanup_project_workspaces() {
     log_info "Running bulk cleanup for inactive workspaces..."
     for ws_path in "$workspaces_dir"/*; do
       [[ ! -d "$ws_path" ]] && continue
-      local ws_name=$(basename "$ws_path")
+      local ws_name="${ws_path##*/}"
       validate_workspace_path "$project_root" "$ws_name" || return 1
       [[ "$ws_name" == "main" ]] && continue
 
@@ -839,9 +809,9 @@ init_move() {
 }
 
 recover_init() {
-  local root="$1" journal="$1/.hap-init-journal" kind from to i
+  local root="$1" journal="$1/.hap-init-journal" kind from to i path
   local -a kinds=() froms=() tos=()
-  [[ -d "$journal" && ! -L "$journal" && -f "$journal/operations" ]] || return 1
+  [[ -d "$journal" && ! -L "$journal" && -f "$journal/operations" && ! -L "$journal/operations" ]] || return 1
   while IFS= read -r -d '' kind; do
     IFS= read -r -d '' from || return 1
     IFS= read -r -d '' to || return 1
@@ -859,6 +829,14 @@ recover_init() {
   done < "$journal/operations"
   for ((i=${#kinds[@]}-1; i>=0; i--)); do
     from="${froms[i]}"; to="${tos[i]}"
+    for path in "$from" "$to"; do
+      [[ "$path" == "$root"/* ]] || continue
+      path="${path%/*}"
+      while [[ "$path" != "$root" ]]; do
+        [[ ! -L "$path" ]] || { log_err "Recovery path has a symlink ancestor: $path"; return 1; }
+        path="${path%/*}"
+      done
+    done
     case "${kinds[i]}" in
       C)
         if [[ -e "$from" || -L "$from" ]]; then
@@ -904,6 +882,15 @@ recover_init() {
   rmdir "$journal/staging" 2>/dev/null || true
   rmdir "$journal" || return 1
   log_info "Initialization rolled back; original files restored"
+}
+
+finish_init() {
+  local status="$1" root="$2"
+  trap - EXIT
+  if [[ "$status" -ne 0 ]]; then
+    recover_init "$root" || log_err "Recovery paused; inspect .hap-init-journal and run hap init --recover"
+  fi
+  exit "$status"
 }
 
 hap_init() (
@@ -967,7 +954,7 @@ hap_init() (
     branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || {
       log_err "Check out a branch before initialization: $repo"; return 1;
     }
-    local dirty ignored
+    local dirty
     dirty=$(git -C "$repo" status --porcelain --untracked-files=all) || return 1
     [[ -z "$dirty" ]] || {
       log_err "Commit or preserve local changes and untracked files before init: $repo"
@@ -983,7 +970,7 @@ hap_init() (
   [[ -f "$template" ]] || template="$DATA_DIR/templates/hap.kdl"
   mkdir -m 700 "$INIT_JOURNAL"
   : > "$INIT_JOURNAL/operations"
-  trap 'rc=$?; trap - EXIT; if [[ $rc -ne 0 ]]; then recover_init "$project_root" || log_err "Recovery paused; inspect .hap-init-journal and run hap init --recover"; fi; exit "$rc"' EXIT
+  trap 'finish_init "$?" "$project_root"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   [[ ! -f "$template" ]] || cp "$template" "$INIT_JOURNAL/template"
@@ -1166,7 +1153,7 @@ registry_get() {
 }
 
 registry_rewrite() (
-  local name="$1" path="${2:-}" tmp_db="" lock="$DATA_DIR/.registry.lock" attempts=0
+  local name="$1" project_path="${2:-}" tmp_db="" lock="$DATA_DIR/.registry.lock" attempts=0
   until mkdir -m 700 "$lock" 2>/dev/null; do
     attempts=$((attempts + 1))
     [[ $attempts -lt 100 && ! -L "$lock" ]] || { log_err "Registry is busy: $lock"; return 1; }
@@ -1179,14 +1166,14 @@ registry_rewrite() (
   [[ ! -L "$DB_FILE" ]] || { log_err "Refusing a symlinked registry"; return 1; }
   tmp_db=$(mktemp "$DATA_DIR/.projects.XXXXXXXX") || return 1
   awk -F '|' -v key="$name" '$1 != key' "$DB_FILE" > "$tmp_db" || return 1
-  [[ -z "$path" ]] || printf '%s|%s\n' "$name" "$path" >> "$tmp_db" || return 1
+  [[ -z "$project_path" ]] || printf '%s|%s\n' "$name" "$project_path" >> "$tmp_db" || return 1
   mv "$tmp_db" "$DB_FILE"
 )
 
 hap_add() {
-  local name="${1:?'Project name required. Usage: hap add <name> [path]'}" path="${2:-.}" full_path
+  local name="${1:?'Project name required. Usage: hap add <name> [path]'}" project_path="${2:-.}" full_path
   validate_name "$name" project || return 1
-  full_path=$(cd -- "$path" && pwd -P) || return 1
+  full_path=$(cd -- "$project_path" && pwd -P) || return 1
   case "$full_path" in *'|'*|*$'\n'*|*$'\r'*) log_err "Project paths cannot contain pipes or line breaks"; return 1 ;; esac
   ensure_db || return 1
   registry_rewrite "$name" "$full_path" || return 1

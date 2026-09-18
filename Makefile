@@ -26,4 +26,13 @@ uninstall:
 	@rmdir "$(DATADIR)/templates" 2>/dev/null || true
 	@echo "🗑️  Uninstalled hap"
 
-.PHONY: all install uninstall
+test:
+	python3 -m unittest discover -s tests -v
+
+lint:
+	bash -n bin/hap install.sh
+	shellcheck bin/hap install.sh
+
+check: lint test
+
+.PHONY: all install uninstall test lint check
