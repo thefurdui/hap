@@ -314,6 +314,20 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
         self.assertFalse((self.project / "workspaces/task").exists())
 
+    def test_failed_install_blocks_readiness_and_can_retry(self):
+        self.repo(files={"file.txt": "x", "pnpm-lock.yaml": "fixture"})
+        self.register()
+        self.stub("pnpm", 'sleep 0.1\nprintf finished > "$PWD/install.finished"\nexit 7')
+        result = self.hap("open", "project", "task", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        work = self.project / "workspaces/task"
+        self.assertTrue((work / "app/install.finished").exists())
+        self.assertFalse((work / ".hap-ready").exists())
+        self.assertFalse((self.base / "commands.log").exists())
+        self.stub("pnpm", "exit 0")
+        self.hap("open", "project", "task")
+        self.assertTrue((work / ".hap-ready").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

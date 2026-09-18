@@ -526,9 +526,9 @@ setup_workspace_repo() {
     ) || return 1
   fi
   if [[ -f "$work/pnpm-lock.yaml" ]]; then
-    (cd "$work" && pnpm install --frozen-lockfile --silent &)
+    (cd "$work" && pnpm install --frozen-lockfile) || return 1
   elif [[ -f "$work/go.mod" ]]; then
-    (cd "$work" && go mod download &)
+    (cd "$work" && go mod download) || return 1
   fi
 }
 
@@ -577,7 +577,6 @@ prepare_workspace() {
       [[ -e "$work" || -L "$work" ]] || ln -s "$repo" "$work" || return 1
     fi
   done
-  wait
   printf '1\n' > "$target_ws/.hap-ready" || return 1
   # Reserve the workspace through session launch, closing the cleanup race.
   printf '%s\n' "$$" > "$target_ws/.hap-opening" || return 1
