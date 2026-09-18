@@ -175,6 +175,19 @@ class HapTests(unittest.TestCase):
         self.hap("clean", "project", "task", check=False)
         self.assertTrue(work.exists())
 
+    def test_bulk_cleanup_uses_registered_session_alias(self):
+        _, work = self.workspace()
+        self.register("alias")
+        self.env["HAP_TEST_SESSIONS"] = "alias-task"
+        self.hap("clean", "alias")
+        self.assertTrue(work.exists())
+
+    def test_bulk_cleanup_preserves_unknown_session_activity(self):
+        _, work = self.workspace()
+        self.env["HAP_TEST_SESSION_EXIT"] = "1"
+        self.assertNotEqual(self.hap("clean", "project", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
