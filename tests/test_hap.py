@@ -153,6 +153,28 @@ class HapTests(unittest.TestCase):
         self.assertEqual((work / "file.txt").read_text(), "uncommitted")
         self.assertIn("hap/task", self.git(source, "ls-remote", "--heads", "origin").stdout)
 
+    def test_cleanup_preserves_ignored_and_loose_files(self):
+        _, work = self.workspace()
+        (work / "ignored.txt").write_text("ignored data")
+        self.hap("clean", "project", "task", check=False)
+        self.assertTrue(work.exists())
+        (work / "ignored.txt").unlink()
+        (work.parent / ".notes").write_text("workspace notes")
+        self.hap("clean", "project", "task", check=False)
+        self.assertTrue((work.parent / ".notes").exists())
+
+    def test_cleanup_respects_git_lock(self):
+        source, work = self.workspace()
+        self.git(source, "worktree", "lock", work)
+        self.hap("clean", "project", "task", check=False)
+        self.assertTrue(work.exists())
+
+    def test_cleanup_stops_on_inspection_failure(self):
+        _, work = self.workspace()
+        self.stub("git", f'if [ "$3" = status ]; then exit 128; fi\nexec "{GIT}" "$@"')
+        self.hap("clean", "project", "task", check=False)
+        self.assertTrue(work.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

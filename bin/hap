@@ -194,104 +194,62 @@ zellij_session_exists() {
 # --- CLEANUP FUNCTIONS ---
 
 cleanup_workspace() {
-  local ws_path="$1"
-  local sources_dir="$2"
-  local delete_local="${3:-false}"
-  local delete_remote="${4:-false}"
+  local ws_path="$1" sources_dir="$2" delete_remote="${4:-false}"
+  local repo source_repo repo_name status tip branch common git_dir remote_tip
+  local -a repos=() branches=() tips=()
+  [[ -d "$ws_path" ]] || { log_err "Workspace not found: $ws_path"; return 1; }
 
-  [[ ! -d "$ws_path" ]] && return 0
-
-  # Keep branch refs. Detached tips need an explicit ref before removing their reflog.
-  local repo tip branch remote_tip remote_ref
-  for repo in "$ws_path"/*; do
-    [[ -e "$repo/.git" ]] || continue
+  # Inventory every entry, including ignored files and workspace-level notes.
+  # Unknown contents are never disposable merely because Git cannot see them.
+  for repo in "$ws_path"/* "$ws_path"/.[!.]* "$ws_path"/..?*; do
+    [[ -e "$repo" || -L "$repo" ]] || continue
+    [[ "$repo" == "$ws_path/$GUI_LOCK_FILE" && -f "$repo" && ! -L "$repo" ]] && continue
+    repo_name="${repo##*/}"
+    source_repo="$sources_dir/$repo_name"
+    if [[ -L "$repo" || ! -f "$repo/.git" || -L "$repo/.git" || -L "$source_repo" || ! -d "$source_repo/.git" ]]; then
+      log_err "Preserving unknown workspace entry: $repo"
+      return 1
+    fi
+    common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir) || return 1
+    [[ "$common" == "$(cd "$source_repo/.git" && pwd -P)" ]] || { log_err "Worktree belongs to another source: $repo"; return 1; }
+    git_dir=$(git -C "$repo" rev-parse --absolute-git-dir) || return 1
+    [[ ! -e "$git_dir/locked" ]] || { log_err "Worktree is locked: $repo"; return 1; }
+    status=$(git -C "$repo" status --porcelain --untracked-files=all --ignored) || {
+      log_err "Cannot inspect $repo"; return 1;
+    }
+    [[ -z "$status" ]] || { log_warn "Preserving $repo — local or ignored files present"; return 1; }
     tip=$(git -C "$repo" rev-parse --verify HEAD) || return 1
-    if ! branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD); then
-      local recovery="refs/hap/recovery/$(basename "$ws_path")/$(basename "$repo")-$tip"
-      git -C "$repo" update-ref "$recovery" "$tip" || return 1
-      log_info "Preserved detached history at $recovery"
-    elif [[ "$delete_remote" == true ]]; then
-      remote_ref="refs/heads/$branch"
-      remote_tip=$(git -C "$repo" ls-remote --exit-code --heads origin "$remote_ref") || {
+    branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || branch=""
+    if [[ "$delete_remote" == true && -n "$branch" ]]; then
+      remote_tip=$(git -C "$repo" ls-remote --exit-code --heads origin "refs/heads/$branch") || {
         log_err "Cannot verify remote branch: $branch"; return 1;
       }
       remote_tip="${remote_tip%%$'\t'*}"
-      [[ "$remote_tip" == "$tip" ]] || {
-        log_err "Remote branch differs from preserved local history: $branch"; return 1;
-      }
+      [[ "$remote_tip" == "$tip" ]] || { log_err "Remote branch differs from local history: $branch"; return 1; }
+    fi
+    repos+=("$repo")
+    branches+=("$branch")
+    tips+=("$tip")
+  done
+
+  local i recovery
+  for ((i = 0; i < ${#repos[@]}; i++)); do
+    repo="${repos[i]}"
+    source_repo="$sources_dir/${repo##*/}"
+    if [[ -z "${branches[i]}" ]]; then
+      recovery="refs/hap/recovery/${ws_path##*/}/${repo##*/}-${tips[i]}"
+      git -C "$repo" update-ref "$recovery" "${tips[i]}" || return 1
+      log_info "Preserved detached history at $recovery"
+    fi
+    # Never replace Git's refusal with recursive filesystem deletion.
+    git -C "$source_repo" worktree remove "$repo" || return 1
+    if [[ "$delete_remote" == true && -n "${branches[i]}" ]]; then
+      branch="${branches[i]}"
+      git -C "$source_repo" push --force-with-lease="refs/heads/$branch:${tips[i]}" origin ":refs/heads/$branch" || return 1
     fi
   done
-
-  # Check for uncommitted changes
-  for repo in "$ws_path"/*; do
-    if [[ -e "$repo/.git" ]]; then
-      local status=$(git -C "$repo" status --porcelain 2>/dev/null || echo "")
-      if [[ -n "$status" ]]; then
-        log_warn "Preserving $(basename "$ws_path") — uncommitted changes"
-        return 1
-      fi
-    fi
-  done
-
-  # Collect branches to delete if requested
-  local branches_to_delete=()
-  if [[ "$delete_local" == "true" || "$delete_remote" == "true" ]]; then
-    for repo in "$ws_path"/*; do
-      if [[ -e "$repo/.git" ]]; then
-        local branch=$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null || echo "")
-        if [[ -n "$branch" ]]; then
-          branches_to_delete+=("$(basename "$repo")|$branch")
-        fi
-      fi
-    done
-  fi
-
-  # Move out of directory to avoid locks
-  cd / || true
-
-  # Remove worktrees
-  for repo in "$ws_path"/*; do
-    if [[ -e "$repo/.git" ]]; then
-      local repo_name=$(basename "$repo")
-      git -C "$sources_dir/$repo_name" worktree prune 2>/dev/null || true
-      git -C "$sources_dir/$repo_name" worktree remove "$repo" --force 2>/dev/null || true
-    fi
-  done
-
-  # Remove GUI lock file
-  rm -f "$ws_path/$GUI_LOCK_FILE" 2>/dev/null || true
-
-  # Remove directory (with simple retry)
-  local retry=0
-  while [[ -d "$ws_path" && $retry -lt 5 ]]; do
-    rm -rf "$ws_path" 2>/dev/null || true
-    [[ -d "$ws_path" ]] && sleep 0.2 || true
-    retry=$((retry + 1))
-  done
-
-  if [[ ! -d "$ws_path" ]]; then
-    # Delete refs if requested
-    for item in "${branches_to_delete[@]}"; do
-      local repo_name="${item%|*}"
-      local branch="${item#*|}"
-      local source_repo="$sources_dir/$repo_name"
-
-      if [[ -d "$source_repo" ]]; then
-        if [[ "$delete_remote" == "true" ]]; then
-          log_info "Deleting remote branch $branch for $repo_name..."
-          tip=$(git -C "$source_repo" rev-parse "refs/heads/$branch") || return 1
-          git -C "$source_repo" push --force-with-lease="refs/heads/$branch:$tip" origin ":refs/heads/$branch" || return 1
-        fi
-        if [[ "$delete_local" == "true" ]]; then
-          log_info "Deleting local branch $branch for $repo_name..."
-          log_info "Keeping local branch $branch to preserve history"
-        fi
-      fi
-    done
-    return 0
-  else
-    return 1
-  fi
+  rm -f "$ws_path/$GUI_LOCK_FILE" || return 1
+  rmdir "$ws_path" || return 1
 }
 
 cleanup_project_workspaces() {
