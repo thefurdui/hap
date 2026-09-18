@@ -392,6 +392,25 @@ class HapTests(unittest.TestCase):
         self.hap("open", "project", "task", "--reuse-branch")
         self.assertTrue((self.project / "workspaces/task/app/.git").exists())
 
+    def test_editor_failure_is_reported(self):
+        self.workspace()
+        self.env["HAP_TEST_EDITOR_EXIT"] = "9"
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces/task/.hap-opening").exists())
+
+    def test_bulk_cleanup_reports_preserved_dirty_workspace(self):
+        _, work = self.workspace()
+        (work / "file.txt").write_text("dirty")
+        self.assertNotEqual(self.hap("clean", "project", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
+    def test_push_failure_is_reported(self):
+        self.repo()
+        self.register()
+        self.stub("git", f'if [ "$3" = push ]; then exit 9; fi\nexec "{GIT}" "$@"')
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces/task/.hap-ready").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

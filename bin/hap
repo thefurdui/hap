@@ -276,6 +276,7 @@ cleanup_project_workspaces() {
   local project_root="$1"
   local task="$2"
   local project_name="$3"
+  local failures=0
   local sources_dir="$project_root/sources"
   local workspaces_dir="$project_root/workspaces"
   validate_project_root "$project_root" || return 1
@@ -332,9 +333,12 @@ cleanup_project_workspaces() {
 
       if cleanup_workspace "$ws_path" "$sources_dir" "$delete_local" "$delete_remote"; then
         log_succ "Cleaned: $ws_name"
+      else
+        failures=1
       fi
     done
   fi
+  return "$failures"
 }
 
 # --- SETUP ---
@@ -470,7 +474,7 @@ launch_session() {
     fi
 
     # Run as subprocess (Blocking, but Zellij takes over terminal)
-    env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || true
+    env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || return 1
     ;;
   cursor | antigravity)
     # Create Lock File (Prevents Bulk Cleanup)
@@ -600,7 +604,7 @@ prepare_workspace() {
           base_oid=$(resolve_base_commit "$repo" "$base_branch") || return 1
           git -C "$repo" worktree add "$work" -b "$branch_name" "$base_oid" || return 1
         fi
-        git -C "$work" push -u origin "$branch_name" || true
+        git -C "$work" push -u origin "$branch_name" || return 1
       fi
       setup_workspace_repo "$project_root" "$target_ws" "$repo_name" || return 1
     fi
