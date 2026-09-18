@@ -633,6 +633,41 @@ remove_managed_state() {
   done < "$manifest"
 }
 
+# Adopt exact pre-existing shared links without changing their contents or topology.
+# A directory link owns its whole subtree; provisioning must not write through it.
+# Return 2 when no legacy link is present, 1 for an unsafe/conflicting link.
+preserve_legacy_shared_link() {
+  local work="$1" shared="$2" relative="$3" manifest="$4"
+  local part prefix="" up="../../../" target lookup
+  local -a parts
+  IFS=/ read -r -a parts <<< "$relative"
+  for part in "${parts[@]}"; do
+    prefix="${prefix:+$prefix/}$part"
+    if [[ -L "$work/$prefix" ]]; then
+      safe_destination "$shared" "$prefix" || return 1
+      target=$(readlink "$work/$prefix") || return 1
+      if [[ "$target" != "$shared/$prefix" && "$target" != "${up}shared/${shared##*/}/$prefix" ]]; then
+        log_err "Refusing unrelated symlink in state destination: $work/$prefix"
+        return 1
+      fi
+      if managed_lookup "$manifest" "$prefix"; then
+        [[ "$MANAGED_KIND" == L && "$MANAGED_VALUE" == "$target" ]] || {
+          log_err "Shared link differs from recorded state: $work/$prefix"; return 1;
+        }
+      else
+        lookup=$?
+        [[ $lookup -eq 1 ]] || return 1
+        ignore_generated_path "$work" "$prefix" || return 1
+        printf '%s\0L\0%s\0' "$prefix" "$target" >> "$manifest" || return 1
+        log_info "Preserving existing shared link: $work/$prefix"
+      fi
+      return 0
+    fi
+    up="../$up"
+  done
+  return 2
+}
+
 setup_workspace_repo() {
   local project_root="$1" target_ws="$2" repo_name="$3"
   local work="$target_ws/$repo_name" shared="$project_root/shared/$repo_name"
@@ -652,13 +687,6 @@ setup_workspace_repo() {
       find . -type f -print0 | while IFS= read -r -d '' file; do
         local clean_file="${file#./}" ups="../../../" subdir kind value lookup
         local dest="$work/$clean_file"
-        subdir=$(dirname "$clean_file")
-        if [[ "$subdir" != . ]]; then
-          safe_destination "$work" "$subdir" || exit 1
-          local depth
-          depth=$(awk -F/ '{print NF}' <<< "$subdir")
-          for ((i=0; i<depth; i++)); do ups="../$ups"; done
-        fi
         if managed_lookup "$manifest" "$clean_file"; then
           # Keep local edits and deletions; opening is not a refresh operation.
           continue
@@ -666,27 +694,30 @@ setup_workspace_repo() {
           lookup=$?
           [[ $lookup -eq 1 ]] || exit 1
         fi
-        local legacy=false
-        if [[ -L "$dest" && "$(readlink "$dest")" == "${ups}shared/$repo_name/$clean_file" ]]; then
-          legacy=true
+        if preserve_legacy_shared_link "$work" "$shared" "$clean_file" "$manifest"; then
+          continue
         else
-          safe_destination "$work" "$clean_file" || exit 1
-          [[ ! -e "$dest" ]] || { log_err "State destination exists: $dest"; exit 1; }
+          [[ $? -eq 2 ]] || exit 1
         fi
+        subdir=$(dirname "$clean_file")
+        if [[ "$subdir" != . ]]; then
+          safe_destination "$work" "$subdir" || exit 1
+          local depth
+          depth=$(awk -F/ '{print NF}' <<< "$subdir")
+          for ((i=0; i<depth; i++)); do ups="../$ups"; done
+        fi
+        safe_destination "$work" "$clean_file" || exit 1
+        [[ ! -e "$dest" ]] || { log_err "State destination exists: $dest"; exit 1; }
         ignore_generated_path "$work" "$clean_file" || exit 1
         if [[ -n "${INIT_JOURNAL:-}" ]]; then init_mkdir "${dest%/*}" || exit 1; else mkdir -p "${dest%/*}" || exit 1; fi
         if [[ "${SHARED_CONFIG:-false}" == true ]]; then
           kind=L; value="${ups}shared/$repo_name/$clean_file"
-          if [[ "$legacy" == false ]]; then
-            [[ -z "${INIT_JOURNAL:-}" ]] || init_record L "$dest" "$value" || exit 1
-            ln -s "$value" "$dest" || exit 1
-          fi
+          [[ -z "${INIT_JOURNAL:-}" ]] || init_record L "$dest" "$value" || exit 1
+          ln -s "$value" "$dest" || exit 1
         else
           kind=C
           value=$(git -C "$work" hash-object --no-filters -- "$shared/$clean_file") || exit 1
           [[ -z "${INIT_JOURNAL:-}" ]] || init_record C "$dest" "$value" || exit 1
-          # A legacy link is unlinked, never followed by the copy.
-          [[ "$legacy" == false ]] || rm "$dest" || exit 1
           cp "$shared/$clean_file" "$dest" || exit 1
           chmod 600 "$dest" || exit 1
         fi

@@ -44,7 +44,7 @@ project/
 
 The source repositories are **not bare repositories**. Every linked worktree shares its source's Git object store and refs. Local branches remain after cleanup, and detached tips receive recovery refs.
 
-`shared/` holds configuration seeds. New workspaces receive ordinary copies with mode `0600`, so editing one workspace's `.env` does not change another workspace. `--shared-config` explicitly opts into writable shared symlinks. Existing generated state is kept on subsequent opens; opening does not refresh or overwrite local edits. The `.hap-state/` metadata records generated paths and their initial hashes or link targets so cleanup can recognize unchanged files. Generated files are added to Git's local exclusion rules.
+`shared/` holds configuration seeds. New workspaces receive ordinary copies with mode `0600`, so editing one workspace's `.env` does not change another workspace. `--shared-config` explicitly opts into writable shared symlinks. Existing generated state is kept on subsequent opens; opening does not refresh or overwrite local edits. Exact legacy links into the corresponding shared files or directories remain linked, including absolute links; opening never writes through these links. Their state remains shared until you explicitly migrate it. The `.hap-state/` metadata records generated paths and their initial hashes or link targets so cleanup can recognize unchanged files. Generated files are added to Git's local exclusion rules.
 
 Databases live outside worktrees. `HAP_DATA_DIR` is exported into sessions and points to `data/workspaces/<workspace>/`, or `data/shared/` with `--shared-data`. Applications must actually use this path. For example, customize a server command to set:
 
@@ -180,7 +180,7 @@ The registry is `${XDG_DATA_HOME:-$HOME/.local/share}/hap/projects.csv`, with li
 
 - Read the [v1.2.0 release notes](CHANGELOG.md) before relying on the old cleanup or automatic setup behavior.
 - Add `--install` and `--publish` where you deliberately want those actions. Use `--reuse-branch` when recreating a removed workspace whose local branch remains.
-- Exact old generated config symlinks are converted to local copies on setup by default. New copies preserve the current seed contents; existing local edits are not overwritten.
+- Exact old generated config symlinks, including linked certificate directories, are preserved. New workspaces use local copies by default. Existing local edits are not overwritten.
 - Pre-v1.2 Zellij sessions keep their old `<alias>-<workspace>` names. Attach to them manually while finishing that work; new opens use the path-based identity. Cleanup recognizes legacy names for every currently registered alias and preserves those sessions' workspaces.
 - Existing databases are not relocated merely by upgrading or opening a project. Stop database users, back up state, and explicitly migrate/configure application paths for `data/workspaces/<workspace>/<repo>/`. Old hardcoded `.env` paths continue to mean what the application makes them mean.
 - Old `.hap.gui` markers can be cleared using `hap unlock` after closing their editors.

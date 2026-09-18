@@ -487,6 +487,31 @@ class HapTests(unittest.TestCase):
         self.hap("open", "project", "task", "--shared-config")
         self.assertTrue((self.project / "workspaces/task/app/.env").is_symlink())
 
+    def test_existing_shared_directory_links_are_preserved(self):
+        _, work = self.workspace()
+        shared = self.project / "shared/app/certs"
+        shared.mkdir(parents=True)
+        (shared / "private.pem").write_text("existing key")
+        (work / "certs").symlink_to("../../../shared/app/certs")
+        self.hap("open", "project", "task")
+        self.hap("open", "project", "task")
+        self.assertTrue((work / "certs").is_symlink())
+        self.assertEqual((shared / "private.pem").read_text(), "existing key")
+        receipt = (work.parent / ".hap-state/app").read_bytes()
+        self.assertEqual(receipt.count(b"certs\0L\0"), 1)
+        self.hap("clean", "project", "task")
+        self.assertEqual((shared / "private.pem").read_text(), "existing key")
+
+    def test_absolute_legacy_shared_links_are_preserved(self):
+        _, work = self.workspace()
+        shared = self.project / "shared/app"
+        shared.mkdir(parents=True)
+        (shared / ".env").write_text("local settings")
+        (work / ".env").symlink_to(shared / ".env")
+        self.hap("open", "project", "task")
+        self.assertEqual(os.readlink(work / ".env"), str(shared / ".env"))
+        self.assertEqual((shared / ".env").read_text(), "local settings")
+
     def test_data_paths_are_isolated_and_retained_on_cleanup(self):
         self.repo()
         self.register()
