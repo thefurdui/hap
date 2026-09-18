@@ -268,6 +268,14 @@ class HapTests(unittest.TestCase):
         self.git(work, "add", ".")
         self.assertEqual(self.git(work, "ls-files", ".env").stdout, "")
 
+    def test_init_preserves_existing_external_worktrees(self):
+        self.repo(self.project)
+        external = self.base / "external"
+        self.git(self.project, "worktree", "add", "-q", "-b", "other", external)
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.git(external, "status", "--porcelain")
+        self.assertTrue((self.project / ".git").is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

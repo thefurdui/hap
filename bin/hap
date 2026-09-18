@@ -737,6 +737,15 @@ hap_init() (
     repo="$project_root/$name"
     [[ "$root_repo" == false ]] || repo="$project_root"
     git -C "$repo" rev-parse --verify HEAD >/dev/null || { log_err "Repository has no commit: $repo"; return 1; }
+    local worktrees entry worktree_count=0
+    worktrees=$(git -C "$repo" worktree list --porcelain) || return 1
+    while IFS= read -r entry; do
+      [[ "$entry" != 'worktree '* ]] || worktree_count=$((worktree_count + 1))
+    done <<< "$worktrees"
+    [[ $worktree_count -eq 1 ]] || {
+      log_err "Existing linked worktrees must be preserved separately before init: $repo"
+      return 1
+    }
     branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || {
       log_err "Check out a branch before initialization: $repo"; return 1;
     }
