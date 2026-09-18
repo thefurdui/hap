@@ -187,9 +187,18 @@ print_state_extraction_summary() {
   fi
 }
 
-# Return 0 for active/resumable, 1 for absent, 2 for unknown. Unknown is unsafe.
+# The filesystem identity is stable across aliases and unambiguous across roots.
+workspace_session_name() {
+  local root workspace="$2" digest
+  root=$(cd -- "$1" && pwd -P) || return 1
+  digest=$(printf '%s\0%s\0' "$root" "$workspace" |
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE GIT_DEFAULT_HASH=sha1 git -C / hash-object --stdin) || return 1
+  printf 'hap-%s-%s\n' "$workspace" "${digest:0:16}"
+}
+
+# Return 0 if any name is active/resumable, 1 if absent, 2 if unknown.
 zellij_session_exists() {
-  local session_name="$1" sessions
+  local session_name sessions
   if ! command -v zellij >/dev/null 2>&1; then
     log_err "Cannot determine session activity: zellij is unavailable"
     return 2
@@ -202,13 +211,27 @@ zellij_session_exists() {
     log_err "Cannot determine session activity"
     return 2
   fi
-  grep -Fxq -- "$session_name" <<<"$sessions"
+  for session_name in "$@"; do
+    if grep -Fxq -- "$session_name" <<<"$sessions"; then return 0; fi
+  done
+  return 1
 }
 
 workspace_is_active() {
-  local project_name="$1" ws_path="$2"
+  local project_name="$1" ws_path="$2" root session alias registered canonical
+  local -a names=("$project_name-${ws_path##*/}")
   [[ ! -e "$ws_path/$GUI_LOCK_FILE" && ! -e "$ws_path/.hap-opening" ]] || return 0
-  zellij_session_exists "$project_name-${ws_path##*/}"
+  root=$(cd -- "$ws_path/../.." && pwd -P) || return 2
+  session=$(workspace_session_name "$root" "${ws_path##*/}") || return 2
+  names+=("$session")
+  # Preserve pre-v1.2 sessions opened through any registered alias of this root.
+  registry_validate || return 2
+  while IFS='|' read -r alias registered; do
+    [[ -n "$alias" && -d "$registered" ]] || continue
+    canonical=$(cd -- "$registered" && pwd -P) || return 2
+    [[ "$canonical" != "$root" ]] || names+=("$alias-${ws_path##*/}")
+  done < "$DB_FILE"
+  zellij_session_exists "${names[@]}"
 }
 
 branch_is_protected() {
@@ -779,13 +802,14 @@ prepare_workspace() {
 }
 
 create_workspace() (
-  local root="$1" name="$2" task="$3" editor="${5:-zellij}" profile="${7:-}"
+  local root="$1" name="$2" task="$3" editor="${5:-zellij}" profile="${7:-}" session
   with_project_lock "$root" prepare_workspace "$@" || return 1
   local opening="$root/workspaces/$task/.hap-opening"
   trap 'rm -f "$opening"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  launch_session "$name" "$root/workspaces/$task" "$name-$task" "$root" "$editor" "$profile"
+  session=$(workspace_session_name "$root" "$task") || return 1
+  launch_session "$name" "$root/workspaces/$task" "$session" "$root" "$editor" "$profile"
 )
 
 resolve_base_commit() {

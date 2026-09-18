@@ -131,6 +131,8 @@ Project mutations are serialized with `.hap-lock/`. If a process was killed, ins
 
 Existing Zellij sessions are attached or resurrected without deleting saved session state. Profiles and `-u` affect a newly created session; they do not replace an existing session's layout or restart its servers. Stop and start servers from their panes.
 
+Session names use `hap-<workspace>-<path-hash>`, derived from the canonical project path and workspace name. All aliases for one project reach the same session, and ambiguous alias/workspace combinations stay separate. Moving a project changes its session identity.
+
 The distributed template uses Bash shells and no hardcoded repository names, editors, agents, or optional Git UI. Customize pane `cwd` and `command` properties for your project. Named profiles live in `config/profiles/`; profile names cannot escape that directory.
 
 GUI commands use `--wait`. Their workspace remains protected while the CLI waits, and the GUI marker is removed when the editor returns or fails to launch. A killed process or older fire-and-forget version can leave a marker. After closing the editor, explicitly clear stale markers with:
@@ -179,6 +181,7 @@ The registry is `${XDG_DATA_HOME:-$HOME/.local/share}/hap/projects.csv`, with li
 - Read the [v1.2.0 release notes](CHANGELOG.md) before relying on the old cleanup or automatic setup behavior.
 - Add `--install` and `--publish` where you deliberately want those actions. Use `--reuse-branch` when recreating a removed workspace whose local branch remains.
 - Exact old generated config symlinks are converted to local copies on setup by default. New copies preserve the current seed contents; existing local edits are not overwritten.
+- Pre-v1.2 Zellij sessions keep their old `<alias>-<workspace>` names. Attach to them manually while finishing that work; new opens use the path-based identity. Cleanup recognizes legacy names for every currently registered alias and preserves those sessions' workspaces.
 - Existing databases are not relocated merely by upgrading or opening a project. Stop database users, back up state, and explicitly migrate/configure application paths for `data/workspaces/<workspace>/<repo>/`. Old hardcoded `.env` paths continue to mean what the application makes them mean.
 - Old `.hap.gui` markers can be cleared using `hap unlock` after closing their editors.
 - The new template is installed into the template store. Existing `config/hap.kdl` files are not replaced during an upgrade.

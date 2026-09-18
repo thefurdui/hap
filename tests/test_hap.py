@@ -516,11 +516,41 @@ class HapTests(unittest.TestCase):
 
     def test_zellij_open_attaches_without_deleting_session(self):
         self.workspace()
-        self.env["HAP_TEST_SESSIONS"] = "project-task"
+        self.hap("open", "project", "task")
+        session = (self.base / "commands.log").read_text().split()[-1]
+        self.assertRegex(session, r"^hap-task-[0-9a-f]{16}$")
+        self.env["HAP_TEST_SESSIONS"] = session
         self.hap("open", "project", "task")
         commands = (self.base / "commands.log").read_text()
-        self.assertIn("attach project-task", commands)
+        self.assertIn(f"attach {session}", commands)
         self.assertNotIn("delete-session", commands)
+
+    def test_session_identity_and_cleanup_are_stable_across_aliases(self):
+        _, work = self.workspace()
+        self.hap("add", "alias", self.project)
+        self.hap("open", "project", "task")
+        session = (self.base / "commands.log").read_text().split()[-1]
+        self.env["HAP_TEST_SESSIONS"] = session
+        self.hap("open", "alias", "task")
+        self.assertIn(f"attach {session}", (self.base / "commands.log").read_text())
+        self.assertNotEqual(self.hap("clean", "alias", "task", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
+    def test_cleanup_checks_legacy_sessions_under_other_aliases(self):
+        _, work = self.workspace()
+        self.hap("add", "alias", self.project)
+        self.env["HAP_TEST_SESSIONS"] = "alias-task"
+        self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
+    def test_session_names_do_not_collide_for_composite_aliases(self):
+        self.repo()
+        self.register()
+        self.hap("add", "project-two", self.project)
+        self.hap("open", "project", "two-task")
+        self.hap("open", "project-two", "task")
+        sessions = [line.split()[-1] for line in (self.base / "commands.log").read_text().splitlines()]
+        self.assertNotEqual(sessions[0], sessions[1])
 
     def test_gui_markers_are_removed_on_failure(self):
         _, work = self.workspace()
