@@ -54,6 +54,22 @@ validate_workspace_path() {
   [[ ! -L "$root/workspaces/$name" ]] || { log_err "Refusing symlinked workspace: $name"; return 1; }
 }
 
+# A checked-out branch may contain symlinks. Never follow them while provisioning.
+safe_destination() {
+  local root="$1" relative="$2" component current="$1"
+  local -a components
+  [[ -d "$root" && ! -L "$root" && "$relative" != /* ]] || return 1
+  IFS=/ read -r -a components <<<"$relative"
+  for component in "${components[@]}"; do
+    case "$component" in ''|.|..|.git) log_err "Unsafe state path: $relative"; return 1 ;; esac
+    current="$current/$component"
+    if [[ -L "$current" ]]; then
+      log_err "Refusing symlink in state destination: $current"
+      return 1
+    fi
+  done
+}
+
 # Directories to exclude when scanning for state files
 STATE_EXCLUDE_DIRS="node_modules vendor .git dist build"
 
@@ -525,6 +541,11 @@ create_workspace() {
               local dest_file="$target_ws/$repo_name/$clean_file"
               local dest_dir=$(dirname "$dest_file")
 
+              safe_destination "$target_ws/$repo_name" "$clean_file" || exit 1
+              if [[ -e "$dest_file" ]]; then
+                log_err "State destination already exists: $dest_file"
+                exit 1
+              fi
               mkdir -p "$dest_dir"
 
               local ups="../../../"
@@ -534,7 +555,7 @@ create_workspace() {
                 for ((i = 0; i < sub_depth; i++)); do ups="../$ups"; done
               fi
 
-              ln -sf "${ups}shared/$repo_name/$clean_file" "$dest_file"
+              ln -s "${ups}shared/$repo_name/$clean_file" "$dest_file"
             done
           )
         fi

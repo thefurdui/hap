@@ -110,6 +110,22 @@ class HapTests(unittest.TestCase):
         self.register()
         self.assertNotEqual(self.hap("open", "project", "-p", "../../outside", check=False).returncode, 0)
 
+    def test_shared_link_does_not_follow_branch_symlink(self):
+        source = self.repo()
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / ".env").write_text("unrelated")
+        (source / "config").symlink_to(outside)
+        self.git(source, "add", "config")
+        self.git(source, "commit", "-qm", "directory symlink")
+        shared = self.project / "shared/app/config"
+        shared.mkdir(parents=True)
+        (shared / ".env").write_text("config")
+        self.register()
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertEqual((outside / ".env").read_text(), "unrelated")
+        self.assertFalse((outside / ".env").is_symlink())
+
 
 if __name__ == "__main__":
     unittest.main()
