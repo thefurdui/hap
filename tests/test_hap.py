@@ -514,6 +514,27 @@ class HapTests(unittest.TestCase):
         self.assertTrue(marker.exists())
         self.assertIn("hap/task", self.git(source, "ls-remote", "--heads", "origin").stdout)
 
+    def test_zellij_open_attaches_without_deleting_session(self):
+        self.workspace()
+        self.env["HAP_TEST_SESSIONS"] = "project-task"
+        self.hap("open", "project", "task")
+        commands = (self.base / "commands.log").read_text()
+        self.assertIn("attach project-task", commands)
+        self.assertNotIn("delete-session", commands)
+
+    def test_gui_markers_are_removed_on_failure(self):
+        _, work = self.workspace()
+        self.env["HAP_TEST_EDITOR_EXIT"] = "7"
+        self.assertNotEqual(self.hap("open", "project", "task", "-e", "cursor", check=False).returncode, 0)
+        self.assertFalse((work.parent / ".hap.gui").exists())
+
+    def test_explicit_unlock_clears_legacy_marker(self):
+        _, work = self.workspace()
+        marker = work.parent / ".hap.gui"
+        marker.touch()
+        self.hap("unlock", "project", "task")
+        self.assertFalse(marker.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

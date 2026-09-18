@@ -180,7 +180,11 @@ zellij_session_exists() {
     log_err "Cannot determine session activity: zellij is unavailable"
     return 2
   fi
-  if ! sessions=$(zellij list-sessions --short --no-formatting); then
+  if sessions=$(zellij list-sessions --short --no-formatting 2>&1); then
+    :
+  elif [[ "$sessions" == 'No active zellij sessions found.' ]]; then
+    return 1
+  else
     log_err "Cannot determine session activity"
     return 2
   fi
@@ -466,12 +470,14 @@ launch_session() {
       log_info "Layout profile: $profile"
     fi
 
-    # Prune Zellij session if it exists (Restart context)
-    zellij delete-session "$session_name" 2>/dev/null || true
-
     local args=()
-    [[ -n "$layout_file" ]] && args+=("--new-session-with-layout" "$layout_file") || true
-    args+=("--session" "$session_name")
+    if zellij_session_exists "$session_name"; then
+      args+=(attach "$session_name")
+    else
+      [[ $? -eq 1 ]] || return 1
+      [[ -z "$layout_file" ]] || args+=("--new-session-with-layout" "$layout_file")
+      args+=("--session" "$session_name")
+    fi
 
     unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
     log_info "Command: zellij ${args[*]}"
@@ -489,16 +495,13 @@ launch_session() {
     env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID zellij "${args[@]}" || return 1
     ;;
   cursor | antigravity)
-    # Create Lock File (Prevents Bulk Cleanup)
-    touch "$GUI_LOCK_FILE"
-
-    log_info "Opening $editor..."
-    # NO --wait. Fire and forget.
-    if [[ "$editor" == "cursor" ]]; then
-      cursor .
-    else
-      "$editor" .
-    fi
+    [[ ! -L "$GUI_LOCK_FILE" ]] || { log_err "Unsafe GUI marker"; return 1; }
+    printf '%s|%s\n' "$BASHPID" "$editor" > "$GUI_LOCK_FILE" || return 1
+    log_info "Opening $editor; workspace stays protected until the editor returns"
+    local editor_status=0
+    "$editor" --wait . || editor_status=$?
+    rm -f "$GUI_LOCK_FILE" || return 1
+    return "$editor_status"
     ;;
   *)
     log_err "Unsupported editor: $editor"
@@ -1203,6 +1206,32 @@ hap_list() {
   column -t -s "|" "$DB_FILE"
 }
 
+# Explicitly acknowledge that a crashed/legacy GUI session is no longer in use.
+hap_unlock() {
+  local project="${1:?Project required}" workspace="${2:?Workspace required}" root
+  validate_name "$project" project || return 1
+  ensure_db || return 1
+  root=$(registry_get "$project") || return 1
+  validate_workspace_path "$root" "$workspace" || return 1
+  with_project_lock "$root" unlock_workspace "$root/workspaces/$workspace"
+}
+
+unlock_workspace() {
+  local workspace="$1" marker owner
+  [[ -d "$workspace" ]] || return 1
+  for marker in "$workspace/$GUI_LOCK_FILE" "$workspace/.hap-opening"; do
+    [[ ! -L "$marker" ]] || return 1
+    [[ -f "$marker" ]] || continue
+    IFS='|' read -r owner _ < "$marker" || owner=""
+    if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner" 2>/dev/null; then
+      log_err "Session owner $owner is still running; close the editor/session first"
+      return 1
+    fi
+  done
+  rm -f "$workspace/$GUI_LOCK_FILE" "$workspace/.hap-opening" || return 1
+  log_succ "Cleared stale session markers: ${workspace##*/}"
+}
+
 hap_interactive() {
   ensure_setup "zellij"
   START_UP="false"
@@ -1276,6 +1305,10 @@ remove)
 clean)
   shift
   hap_clean "$@"
+  ;;
+unlock)
+  shift
+  hap_unlock "$@"
   ;;
 list) hap_list ;;
 version | -v | --version) echo "hap v$VERSION" ;;
