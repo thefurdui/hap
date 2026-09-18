@@ -202,6 +202,29 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
         self.assertTrue(work.exists())
 
+    def test_init_preserves_tracked_config_directory(self):
+        self.repo(self.project, {"config/app.txt": "application config", "file.txt": "original"})
+        self.hap("init", "app")
+        self.assertEqual((self.project / "sources/app/config/app.txt").read_text(), "application config")
+        self.assertEqual((self.project / "workspaces/main/app/config/app.txt").read_text(), "application config")
+
+    def test_init_rejects_unborn_repository_before_moves(self):
+        self.git(self.project, "init", "-q", "-b", "dev")
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertTrue((self.project / ".git").exists())
+        self.assertFalse((self.project / "sources").exists())
+
+    def test_init_rolls_back_failed_worktree_creation(self):
+        self.repo(self.project)
+        (self.project / ".env").write_text("local config")
+        self.stub("git", f'if [ "$3" = worktree ] && [ "$4" = add ]; then exit 42; fi\nexec "{GIT}" "$@"')
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertTrue((self.project / ".git").is_dir())
+        self.assertEqual((self.project / ".env").read_text(), "local config")
+        self.assertFalse((self.project / ".hap-init-journal").exists())
+        self.assertFalse((self.project / "sources").exists())
+        self.assertEqual(self.git(self.project, "branch", "--show-current").stdout.strip(), "dev")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,8 +106,8 @@ extract_shared_state() {
   ) | while IFS= read -r file; do
     local clean_file="${file#./}"
     local dest_file="$dest_dir/$clean_file"
-    mkdir -p "$(dirname "$dest_file")"
-    mv "$repo_path/$clean_file" "$dest_file"
+    init_mkdir "$(dirname "$dest_file")" || return 1
+    init_move "$repo_path/$clean_file" "$dest_file" || return 1
     echo "$clean_file"
   done
 }
@@ -126,8 +126,8 @@ extract_data_state() {
   ) | while IFS= read -r file; do
     local clean_file="${file#./}"
     local dest_file="$dest_dir/$clean_file"
-    mkdir -p "$(dirname "$dest_file")"
-    mv "$repo_path/$clean_file" "$dest_file"
+    init_mkdir "$(dirname "$dest_file")" || return 1
+    init_move "$repo_path/$clean_file" "$dest_file" || return 1
     echo "$clean_file"
   done
 }
@@ -601,218 +601,167 @@ create_workspace() {
 
 # --- INIT ---
 
-hap_init() {
-  local project_name="${1:-$(basename "$(pwd)")}"
-  local project_root="$(pwd)"
+# Journal each operation before attempting it. Recovery only removes empty
+# directories or worktrees accepted by Git; conflicts stop without discarding data.
+init_record() { printf '%s\0%s\0%s\0' "$1" "$2" "${3:-}" >> "$INIT_JOURNAL/operations"; }
+
+init_mkdir() {
+  [[ -d "$1" && ! -L "$1" ]] && return 0
+  [[ ! -e "$1" && ! -L "$1" ]] || return 1
+  init_mkdir "${1%/*}" || return 1
+  init_record D "$1" || return 1
+  mkdir "$1"
+}
+
+init_move() {
+  [[ ! -e "$2" && ! -L "$2" ]] || { log_err "Migration destination exists: $2"; return 1; }
+  init_record M "$1" "$2" || return 1
+  mv "$1" "$2"
+}
+
+recover_init() {
+  local root="$1" journal="$1/.hap-init-journal" kind from to i
+  local -a kinds=() froms=() tos=()
+  [[ -d "$journal" && ! -L "$journal" && -f "$journal/operations" ]] || return 1
+  while IFS= read -r -d '' kind; do
+    IFS= read -r -d '' from || return 1
+    IFS= read -r -d '' to || return 1
+    case "$kind" in M|D|W|H) ;; *) log_err "Invalid migration journal"; return 1 ;; esac
+    for path in "$from" "$to"; do
+      [[ -z "$path" ]] && continue
+      if [[ "$kind" == H && "$path" == "$to" ]]; then
+        git check-ref-format "$to" || return 1
+        continue
+      fi
+      case "$path" in "$root"/*) ;; *) log_err "Journal path escapes project"; return 1 ;; esac
+      case "$path/" in */../*|*/./*) log_err "Invalid journal path"; return 1 ;; esac
+    done
+    kinds+=("$kind"); froms+=("$from"); tos+=("$to")
+  done < "$journal/operations"
+  for ((i=${#kinds[@]}-1; i>=0; i--)); do
+    from="${froms[i]}"; to="${tos[i]}"
+    case "${kinds[i]}" in
+      H)
+        [[ ! -d "$from/.git" ]] || git -C "$from" symbolic-ref HEAD "$to" || return 1
+        ;;
+      W)
+        if [[ -f "$to/.git" ]]; then
+          git -C "$from" worktree remove "$to" || return 1
+        elif [[ -d "$to" ]]; then
+          rmdir "$to" || return 1
+        fi
+        ;;
+      M)
+        if [[ -e "$to" || -L "$to" ]]; then
+          [[ ! -e "$from" && ! -L "$from" ]] || { log_err "Recovery conflict: $from"; return 1; }
+          mv "$to" "$from" || return 1
+        fi
+        ;;
+      D) [[ ! -d "$from" ]] || rmdir "$from" || return 1 ;;
+    esac
+  done
+  rm -f "$journal/operations" "$journal/template" || return 1
+  rmdir "$journal/staging" 2>/dev/null || true
+  rmdir "$journal" || return 1
+  log_info "Initialization rolled back; original files restored"
+}
+
+hap_init() (
+  set -e -o pipefail
+  local project_root project_name="${1:-}" repo name branch item shared_files data_files
+  project_root=$(pwd -P)
+  if [[ "$project_name" == --recover ]]; then
+    recover_init "$project_root"
+    return
+  fi
+  project_name="${project_name:-${project_root##*/}}"
   validate_name "$project_name" project || return 1
-
-  # Guard: already initialized
-  if [[ -d "$project_root/sources" ]]; then
-    log_err "Already initialized (sources/ directory exists)"
-    exit 1
-  fi
-
-  # Detect git repos
-  local repos=()
-  local is_root_repo=false
-
-  # Level 0: is the current directory itself a git repo?
+  command -v git >/dev/null || { log_err "Missing dependency: git"; return 1; }
+  INIT_JOURNAL="$project_root/.hap-init-journal"
+  [[ ! -e "$INIT_JOURNAL" && ! -L "$INIT_JOURNAL" ]] || {
+    log_err "An unfinished initialization exists. Inspect it, then run hap init --recover"; return 1;
+  }
+  local root_repo=false
+  local -a repos=() branches=() reports=()
   if [[ -d "$project_root/.git" ]]; then
-    is_root_repo=true
+    root_repo=true
     repos+=("$project_name")
-    log_info "Detected root-level repo: $project_name"
   else
-    # Level 1: immediate subdirectories with .git
-    for dir in "$project_root"/*/; do
-      [[ ! -d "$dir" ]] && continue
-      if [[ -d "$dir/.git" ]]; then
-        local name
-        name=$(basename "$dir")
-        repos+=("$name")
-        log_info "Detected repo: $name"
-      fi
+    for item in "$project_root"/sources "$project_root"/workspaces "$project_root"/shared "$project_root"/data "$project_root"/config; do
+      [[ ! -e "$item" && ! -L "$item" ]] || { log_err "Reserved directory already exists: $item"; return 1; }
     done
-  fi
-
-  if [[ ${#repos[@]} -eq 0 ]]; then
-    log_err "No git repositories found"
-    log_err "Expected .git in current directory, or subdirectories containing .git"
-    exit 1
-  fi
-
-  log_info "Initializing hap project: $project_name (${#repos[@]} repo(s))"
-
-  # Create scaffold (4-Pillar Architecture)
-  mkdir -p "$project_root/sources"
-  mkdir -p "$project_root/workspaces/main"
-  mkdir -p "$project_root/config"
-  mkdir -p "$project_root/shared"
-  mkdir -p "$project_root/data"
-
-  # Track all extraction reports for final summary
-  local all_extraction_reports=()
-
-  if [[ "$is_root_repo" == true ]]; then
-    # --- Single repo at root ---
-    # Move everything into sources/<project_name>, then create a worktree back out.
-    local staging="$project_root/.hap-init-staging"
-    mkdir -p "$staging"
-
-    # Move all contents to staging (visible + dotfiles, skip scaffold dirs)
-    for item in "$project_root"/* "$project_root"/.[!.]*; do
-      [[ ! -e "$item" ]] && continue
-      local item_name
-      item_name=$(basename "$item")
-      case "$item_name" in
-      sources | workspaces | config | shared | data | .hap-init-staging) continue ;;
-      esac
-      mv "$item" "$staging/" 2>/dev/null || true
-    done
-
-    # Staging becomes the source repo
-    mv "$staging" "$project_root/sources/$project_name"
-
-    # --- Extract state files (preserving monorepo paths) ---
-    mkdir -p "$project_root/shared/$project_name"
-    mkdir -p "$project_root/data/$project_name"
-
-    local shared_files data_files
-    shared_files=$(extract_shared_state "$project_root/sources/$project_name" "$project_root/shared/$project_name")
-    data_files=$(extract_data_state "$project_root/sources/$project_name" "$project_root/data/$project_name")
-
-    # Clean up empty extraction dirs
-    rmdir "$project_root/shared/$project_name" 2>/dev/null || true
-    rmdir "$project_root/data/$project_name" 2>/dev/null || true
-
-    if [[ -n "$shared_files" || -n "$data_files" ]]; then
-      all_extraction_reports+=("$project_name"$'\x1f'"$shared_files"$'\x1f'"$data_files")
-    fi
-
-    # Detach HEAD in source to free the branch name for the worktree
-    local current_branch
-    current_branch=$(git -C "$project_root/sources/$project_name" symbolic-ref --short HEAD 2>/dev/null || echo "")
-
-    if [[ -n "$current_branch" ]]; then
-      git -C "$project_root/sources/$project_name" checkout --detach 2>/dev/null
-      git -C "$project_root/sources/$project_name" worktree add \
-        "$project_root/workspaces/main/$project_name" "$current_branch" 2>/dev/null
-      log_succ "Worktree: main/$project_name ($current_branch)"
-    else
-      log_warn "Could not determine branch for $project_name, skipping worktree"
-    fi
-  else
-    # --- Multi-repo ---
-    # Move each repo dir to sources/, create worktrees, collect leftovers.
-    local misc_items=()
-
     for item in "$project_root"/*; do
-      [[ ! -e "$item" ]] && continue
-      local item_name
-      item_name=$(basename "$item")
-
-      # Skip scaffold dirs
-      case "$item_name" in
-      sources | workspaces | config | shared | data | misc) continue ;;
-      esac
-
-      if [[ -d "$item/.git" ]]; then
-        # Git repo — move to sources
-        mv "$item" "$project_root/sources/$item_name"
-
-        # --- Extract state files (preserving monorepo paths) ---
-        mkdir -p "$project_root/shared/$item_name"
-        mkdir -p "$project_root/data/$item_name"
-
-        local shared_files data_files
-        shared_files=$(extract_shared_state "$project_root/sources/$item_name" "$project_root/shared/$item_name")
-        data_files=$(extract_data_state "$project_root/sources/$item_name" "$project_root/data/$item_name")
-
-        # Clean up empty extraction dirs
-        rmdir "$project_root/shared/$item_name" 2>/dev/null || true
-        rmdir "$project_root/data/$item_name" 2>/dev/null || true
-
-        if [[ -n "$shared_files" || -n "$data_files" ]]; then
-          all_extraction_reports+=("$item_name"$'\x1f'"$shared_files"$'\x1f'"$data_files")
-        fi
-
-        local current_branch
-        current_branch=$(git -C "$project_root/sources/$item_name" symbolic-ref --short HEAD 2>/dev/null || echo "")
-
-        if [[ -n "$current_branch" ]]; then
-          git -C "$project_root/sources/$item_name" checkout --detach 2>/dev/null
-          git -C "$project_root/sources/$item_name" worktree add \
-            "$project_root/workspaces/main/$item_name" "$current_branch" 2>/dev/null
-          log_succ "Worktree: main/$item_name ($current_branch)"
-        else
-          log_warn "Could not determine branch for $item_name, skipping worktree"
-        fi
-      else
-        misc_items+=("$item")
-      fi
+      [[ -d "$item/.git" && ! -L "$item" ]] || continue
+      name="${item##*/}"
+      validate_name "$name" repository || return 1
+      repos+=("$name")
     done
-
-    # Collect dotfiles as misc too
-    for item in "$project_root"/.[!.]*; do
-      [[ ! -e "$item" ]] && continue
-      misc_items+=("$item")
-    done
-
-    # Move leftovers to misc/
-    if [[ ${#misc_items[@]} -gt 0 ]]; then
-      mkdir -p "$project_root/misc"
-      for item in "${misc_items[@]}"; do
-        mv "$item" "$project_root/misc/" 2>/dev/null || true
-      done
-      log_info "Moved ${#misc_items[@]} non-repo item(s) to misc/"
-    fi
   fi
-
-  # Copy layout template to config/
-  local script_dir
-  script_dir="$(cd "$(dirname "$0")" && pwd -P)"
-  local hap_root
-  hap_root="$(dirname "$script_dir")"
-  local template="$hap_root/templates/hap.kdl"
-
-  if [[ -f "$template" ]]; then
-    cp "$template" "$project_root/config/hap.kdl"
-    log_succ "Copied layout template to config/hap.kdl"
-  elif [[ -f "$DATA_DIR/templates/hap.kdl" ]]; then
-    cp "$DATA_DIR/templates/hap.kdl" "$project_root/config/hap.kdl"
-    log_succ "Copied layout template to config/hap.kdl"
-  else
-    log_warn "Layout template not found — copy templates/hap.kdl to config/hap.kdl manually"
-  fi
-
-  # Register project (upsert)
-  mkdir -p "$DATA_DIR"
-  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE"
-  if grep -q "^${project_name}|" "$DB_FILE" 2>/dev/null; then
-    local tmp_db
-    tmp_db=$(mktemp)
-    grep -v "^${project_name}|" "$DB_FILE" >"$tmp_db"
-    mv "$tmp_db" "$DB_FILE"
-  fi
-  echo "${project_name}|${project_root}" >>"$DB_FILE"
-
-  # --- Print state extraction summaries ---
-  for report in "${all_extraction_reports[@]}"; do
-    local r_name r_shared r_data
-    IFS=$'\x1f' read -r r_name r_shared r_data <<<"$report"
-    print_state_extraction_summary "$r_name" "$r_shared" "$r_data" "$project_root"
+  [[ ${#repos[@]} -gt 0 ]] || { log_err "No supported Git repositories found"; return 1; }
+  for name in "${repos[@]}"; do
+    repo="$project_root/$name"
+    [[ "$root_repo" == false ]] || repo="$project_root"
+    git -C "$repo" rev-parse --verify HEAD >/dev/null || { log_err "Repository has no commit: $repo"; return 1; }
+    branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || {
+      log_err "Check out a branch before initialization: $repo"; return 1;
+    }
+    branches+=("$branch")
   done
 
-  echo ""
-  log_succ "Project initialized: $project_name"
-  log_info "Next steps:"
-  log_info "  1. Edit config/hap.kdl — set cwd paths and server commands"
-  if [[ ${#all_extraction_reports[@]} -gt 0 ]]; then
-    log_info "  2. Update .env files in shared/ to point to new data/ paths"
-    log_info "  3. Run: hap open $project_name"
-  else
-    log_info "  2. Run: hap open $project_name"
+  local script_dir template
+  script_dir=$(cd "$(dirname "$0")" && pwd -P)
+  template="${script_dir%/*}/templates/hap.kdl"
+  [[ -f "$template" ]] || template="$DATA_DIR/templates/hap.kdl"
+  mkdir -m 700 "$INIT_JOURNAL"
+  : > "$INIT_JOURNAL/operations"
+  trap 'rc=$?; trap - EXIT; if [[ $rc -ne 0 ]]; then recover_init "$project_root" || log_err "Recovery paused; inspect .hap-init-journal and run hap init --recover"; fi; exit "$rc"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [[ ! -f "$template" ]] || cp "$template" "$INIT_JOURNAL/template"
+  if [[ "$root_repo" == true ]]; then
+    mkdir "$INIT_JOURNAL/staging"
+    for item in "$project_root"/* "$project_root"/.[!.]* "$project_root"/..?*; do
+      [[ -e "$item" || -L "$item" ]] || continue
+      [[ "$item" != "$INIT_JOURNAL" ]] || continue
+      init_move "$item" "$INIT_JOURNAL/staging/${item##*/}"
+    done
   fi
-}
+  for name in sources workspaces/main shared data config; do
+    init_mkdir "$project_root/$name"
+  done
+  local i
+  for ((i=0; i<${#repos[@]}; i++)); do
+    name="${repos[i]}"; branch="${branches[i]}"
+    if [[ "$root_repo" == true ]]; then
+      init_move "$INIT_JOURNAL/staging" "$project_root/sources/$name"
+    else
+      init_move "$project_root/$name" "$project_root/sources/$name"
+    fi
+    repo="$project_root/sources/$name"
+    shared_files=$(extract_shared_state "$repo" "$project_root/shared/$name")
+    data_files=$(extract_data_state "$repo" "$project_root/data/$name")
+    reports+=("$name"$'\x1f'"$shared_files"$'\x1f'"$data_files")
+    init_record H "$repo" "refs/heads/$branch"
+    git -C "$repo" checkout --detach
+    init_record W "$repo" "$project_root/workspaces/main/$name"
+    git -C "$repo" worktree add "$project_root/workspaces/main/$name" "$branch"
+  done
+  if [[ -f "$INIT_JOURNAL/template" ]]; then
+    init_move "$INIT_JOURNAL/template" "$project_root/config/hap.kdl"
+  fi
+  hap_add "$project_name" "$project_root"
+  # Only journal-owned files remain here; never recursively remove a migration tree.
+  rm "$INIT_JOURNAL/operations"
+  rmdir "$INIT_JOURNAL"
+  trap - EXIT INT TERM
+  for item in "${reports[@]}"; do
+    local r_name r_shared r_data
+    IFS=$'\x1f' read -r r_name r_shared r_data <<<"$item"
+    print_state_extraction_summary "$r_name" "$r_shared" "$r_data" "$project_root"
+  done
+  log_succ "Project initialized: $project_name"
+  log_info "Edit config/hap.kdl, then run hap open $project_name"
+)
 
 # --- COMMANDS ---
 
