@@ -89,6 +89,8 @@ SQLite does not generally lose locking simply because a path is a symlink: its U
 
 ## Open a workspace
 
+By default, hap uses every repository in `sources/`. To keep archived sources in place without including them in workspace setup, add `config/repositories` with one active repository name per line. Blank lines and lines starting with `#` are ignored. The list must be nonempty and cannot contain missing or duplicate repositories. Repositories omitted from it and their existing worktrees are preserved.
+
 ```sh
 hap                              # interactive project picker
 hap open my-project              # initial main workspace
@@ -185,6 +187,7 @@ The registry is `${XDG_DATA_HOME:-$HOME/.local/share}/hap/projects.csv`, with li
 - Existing databases are not relocated merely by upgrading or opening a project. Stop database users, back up state, and explicitly migrate/configure application paths for `data/workspaces/<workspace>/<repo>/`. Old hardcoded `.env` paths continue to mean what the application makes them mean.
 - Old `.hap.gui` markers can be cleared using `hap unlock` after closing their editors.
 - The new template is installed into the template store. Existing `config/hap.kdl` files are not replaced during an upgrade.
+- Older single-repository projects with Git directly in `sources/` can reopen existing flat workspaces in place. Hap does not relocate their files or automatically convert them to the newer nested layout.
 
 ## Development
 

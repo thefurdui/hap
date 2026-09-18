@@ -758,11 +758,27 @@ with_project_lock() (
 )
 
 discover_sources() {
-  local root="$1" repo top
+  local root="$1" repo top name existing selection="$1/config/repositories"
+  local -a candidates=()
   SOURCE_REPOS=()
   [[ -d "$root/sources" && ! -L "$root/sources" ]] || { log_err "Missing sources directory"; return 1; }
-  for repo in "$root/sources"/* "$root/sources"/.[!.]* "$root/sources"/..?*; do
+  if [[ -e "$selection" || -L "$selection" ]]; then
+    [[ -f "$selection" && ! -L "$selection" ]] || { log_err "Unsafe repository selection: $selection"; return 1; }
+    while IFS= read -r name || [[ -n "$name" ]]; do
+      [[ -n "$name" && "$name" != \#* ]] || continue
+      validate_name "$name" repository || return 1
+      for existing in "${candidates[@]}"; do
+        [[ "$existing" != "$root/sources/$name" ]] || { log_err "Duplicate selected repository: $name"; return 1; }
+      done
+      [[ -d "$root/sources/$name" ]] || { log_err "Selected source is missing: $name"; return 1; }
+      candidates+=("$root/sources/$name")
+    done < "$selection"
+  else
+    candidates=("$root/sources"/* "$root/sources"/.[!.]* "$root/sources"/..?*)
+  fi
+  for repo in "${candidates[@]}"; do
     [[ -e "$repo" || -L "$repo" ]] || continue
+    [[ "${repo##*/}" == .DS_Store && -f "$repo" && ! -L "$repo" ]] && continue
     validate_name "${repo##*/}" repository || return 1
     [[ -d "$repo/.git" && ! -L "$repo" && ! -L "$repo/.git" ]] || {
       log_err "Source must be a regular Git checkout, not a symlink, bare repo, or linked worktree: $repo"
@@ -776,12 +792,40 @@ discover_sources() {
   [[ ${#SOURCE_REPOS[@]} -gt 0 ]] || { log_err "No source repositories found"; return 1; }
 }
 
+prepare_existing_flat_workspace() {
+  local root="$1" task="$2" source="$1/sources" work="$1/workspaces/$2" common branch
+  [[ ! -L "$source/.git" && -f "$work/.git" && ! -L "$work/.git" ]] || {
+    log_err "Legacy flat projects can reopen existing workspaces; no files were relocated"
+    return 1
+  }
+  common=$(git -C "$work" rev-parse --path-format=absolute --git-common-dir) || return 1
+  [[ "$common" == "$(cd "$source/.git" && pwd -P)" ]] || { log_err "Worktree belongs to another source: $work"; return 1; }
+  require_dependency_tools "$work" HEAD || return 1
+  if [[ "${FETCH_BASE:-false}" == true ]]; then git -C "$source" fetch origin || return 1; fi
+  if [[ "${INSTALL_DEPS:-false}" == true ]]; then
+    if [[ -f "$work/pnpm-lock.yaml" ]]; then
+      (cd "$work" && pnpm install --frozen-lockfile) || return 1
+    elif [[ -f "$work/go.mod" ]]; then
+      (cd "$work" && go mod download) || return 1
+    fi
+  fi
+  if [[ "${PUBLISH_BRANCH:-false}" == true ]]; then
+    branch=$(git -C "$work" symbolic-ref --quiet --short HEAD) || return 1
+    git -C "$work" push -u origin "$branch" || return 1
+  fi
+  log_info "Opening existing flat workspace without relocating files: $task"
+}
+
 prepare_workspace() {
   local project_root="$1" project_name="$2" agent_task="$3" base_branch="$4"
   local editor="$5" target_branch="$6"
   local sources_dir="$project_root/sources" target_ws="$project_root/workspaces/$agent_task"
   local repo repo_name work branch_name common base_oid
   validate_workspace_path "$project_root" "$agent_task" || return 1
+  if [[ -d "$sources_dir/.git" ]]; then
+    prepare_existing_flat_workspace "$project_root" "$agent_task"
+    return $?
+  fi
   discover_sources "$project_root" || return 1
   # Check tools for the selected commits before creating any workspace directory.
   for repo in "${SOURCE_REPOS[@]}"; do
@@ -844,7 +888,7 @@ create_workspace() (
   local root="$1" name="$2" task="$3" editor="${5:-zellij}" profile="${7:-}" session
   with_project_lock "$root" prepare_workspace "$@" || return 1
   local opening="$root/workspaces/$task/.hap-opening"
-  trap 'rm -f "$opening"' EXIT
+  if [[ ! -d "$root/sources/.git" ]]; then trap 'rm -f "$opening"' EXIT; fi
   trap 'exit 130' INT
   trap 'exit 143' TERM
   session=$(workspace_session_name "$root" "$task") || return 1

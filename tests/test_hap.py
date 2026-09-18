@@ -368,6 +368,49 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
         self.assertFalse((self.project / "workspaces").exists())
 
+    def test_existing_flat_project_opens_without_relocation(self):
+        source = self.repo(self.project / "sources")
+        work = self.project / "workspaces/main"
+        work.parent.mkdir()
+        self.git(source, "worktree", "add", "-q", "-b", "hap/main", work, "dev")
+        (work / "file.txt").write_text("valuable local changes")
+        self.register()
+        self.hap("open", "project")
+        self.assertEqual((work / "file.txt").read_text(), "valuable local changes")
+        self.assertTrue((work / ".git").is_file())
+        self.assertFalse((work / "sources").exists())
+        self.assertFalse((work / ".hap-ready").exists())
+
+    def test_finder_metadata_does_not_block_source_discovery(self):
+        self.repo()
+        metadata = self.project / "sources/.DS_Store"
+        metadata.write_bytes(b"preserve finder settings")
+        self.register()
+        self.hap("open", "project")
+        self.assertEqual(metadata.read_bytes(), b"preserve finder settings")
+
+    def test_project_can_exclude_archived_sources_without_moving_them(self):
+        self.repo()
+        archived = self.repo(self.project / "sources/archived")
+        self.register()
+        config = self.project / "config"
+        config.mkdir()
+        (config / "repositories").write_text("# Active repositories only\napp\n")
+        self.hap("open", "project")
+        self.assertTrue((self.project / "workspaces/main/app/.git").exists())
+        self.assertFalse((self.project / "workspaces/main/archived").exists())
+        self.assertTrue((archived / ".git").is_dir())
+
+    def test_invalid_repository_selection_fails_before_mutation(self):
+        self.repo()
+        self.register()
+        config = self.project / "config"
+        config.mkdir()
+        for entries in ("../outside\n", "app\napp\n", "missing\n", "# nothing selected\n"):
+            (config / "repositories").write_text(entries)
+            self.assertNotEqual(self.hap("open", "project", check=False).returncode, 0)
+            self.assertFalse((self.project / "workspaces").exists())
+
     def test_linked_worktree_sources_are_rejected(self):
         original = self.repo(self.base / "original")
         source = self.project / "sources/linked"
