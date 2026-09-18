@@ -276,6 +276,12 @@ class HapTests(unittest.TestCase):
         self.git(external, "status", "--porcelain")
         self.assertTrue((self.project / ".git").is_dir())
 
+    def test_init_provisions_main_config(self):
+        self.repo(self.project)
+        (self.project / ".env").write_text("local configuration")
+        self.hap("init", "app")
+        self.assertEqual((self.project / "workspaces/main/app/.env").read_text(), "local configuration")
+
 
 if __name__ == "__main__":
     unittest.main()

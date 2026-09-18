@@ -524,6 +524,47 @@ launch_session() {
 
 # --- WORKSPACE ---
 
+setup_workspace_repo() {
+  local project_root="$1" target_ws="$2" repo_name="$3"
+  local work="$target_ws/$repo_name" shared="$project_root/shared/$repo_name"
+  if [[ -d "$shared" ]]; then
+    [[ ! -L "$shared" ]] || { log_err "Shared repository directory is a symlink: $shared"; return 1; }
+    (
+      cd "$shared" || exit 1
+      find . -type f | while IFS= read -r file; do
+        local clean_file="${file#./}" ups="../../../" subdir
+        local dest="$work/$clean_file"
+        subdir=$(dirname "$clean_file")
+        if [[ "$subdir" != . ]]; then
+          safe_destination "$work" "$subdir" || exit 1
+          local depth
+          depth=$(awk -F/ '{print NF}' <<< "$subdir")
+          for ((i=0; i<depth; i++)); do ups="../$ups"; done
+        fi
+        # Repeat setup is safe only for the exact link hap previously generated.
+        if [[ -L "$dest" && "$(readlink "$dest")" == "${ups}shared/$repo_name/$clean_file" ]]; then
+          continue
+        fi
+        safe_destination "$work" "$clean_file" || exit 1
+        ignore_generated_path "$work" "$clean_file" || exit 1
+        [[ ! -e "$dest" ]] || { log_err "State destination exists: $dest"; exit 1; }
+        if [[ -n "${INIT_JOURNAL:-}" ]]; then
+          init_mkdir "${dest%/*}" || exit 1
+          init_record L "$dest" "${ups}shared/$repo_name/$clean_file" || exit 1
+        else
+          mkdir -p "${dest%/*}" || exit 1
+        fi
+        ln -s "${ups}shared/$repo_name/$clean_file" "$dest" || exit 1
+      done
+    ) || return 1
+  fi
+  if [[ -f "$work/pnpm-lock.yaml" ]]; then
+    (cd "$work" && pnpm install --frozen-lockfile --silent &)
+  elif [[ -f "$work/go.mod" ]]; then
+    (cd "$work" && go mod download &)
+  fi
+}
+
 create_workspace() {
   local project_root="$1"
   local project_name="$2"
@@ -562,41 +603,8 @@ create_workspace() {
 
         git -C "$target_ws/$repo_name" push -u origin "$branch_name" 2>/dev/null || true
 
-        # Shared State Linking
-        if [[ -d "$project_root/shared/$repo_name" ]]; then
-          log_info "Linking shared state for $repo_name..."
-          (
-            cd "$project_root/shared/$repo_name" || exit
-            find . -type f | while read -r file; do
-              local clean_file="${file#./}"
-              local dest_file="$target_ws/$repo_name/$clean_file"
-              local dest_dir=$(dirname "$dest_file")
+        setup_workspace_repo "$project_root" "$target_ws" "$repo_name"
 
-              safe_destination "$target_ws/$repo_name" "$clean_file" || exit 1
-              ignore_generated_path "$target_ws/$repo_name" "$clean_file" || exit 1
-              if [[ -e "$dest_file" ]]; then
-                log_err "State destination already exists: $dest_file"
-                exit 1
-              fi
-              mkdir -p "$dest_dir"
-
-              local ups="../../../"
-              local subdir=$(dirname "$clean_file")
-              if [[ "$subdir" != "." ]]; then
-                local sub_depth=$(echo "$subdir" | awk -F/ '{print NF}')
-                for ((i = 0; i < sub_depth; i++)); do ups="../$ups"; done
-              fi
-
-              ln -s "${ups}shared/$repo_name/$clean_file" "$dest_file"
-            done
-          )
-        fi
-
-        if [[ -f "$target_ws/$repo_name/pnpm-lock.yaml" ]]; then
-          (cd "$target_ws/$repo_name" && pnpm install --frozen-lockfile --silent &)
-        elif [[ -f "$target_ws/$repo_name/go.mod" ]]; then
-          (cd "$target_ws/$repo_name" && go mod download &)
-        fi
       else
         log_info "Linking source: $repo_name"
         ln -sf "$repo" "$target_ws/$repo_name"
@@ -651,11 +659,11 @@ recover_init() {
   while IFS= read -r -d '' kind; do
     IFS= read -r -d '' from || return 1
     IFS= read -r -d '' to || return 1
-    case "$kind" in M|D|W|H) ;; *) log_err "Invalid migration journal"; return 1 ;; esac
+    case "$kind" in M|D|W|H|L) ;; *) log_err "Invalid migration journal"; return 1 ;; esac
     for path in "$from" "$to"; do
       [[ -z "$path" ]] && continue
-      if [[ "$kind" == H && "$path" == "$to" ]]; then
-        git check-ref-format "$to" || return 1
+      if [[ "$path" == "$to" && ( "$kind" == H || "$kind" == L ) ]]; then
+        [[ "$kind" != H ]] || git check-ref-format "$to" || return 1
         continue
       fi
       case "$path" in "$root"/*) ;; *) log_err "Journal path escapes project"; return 1 ;; esac
@@ -666,6 +674,13 @@ recover_init() {
   for ((i=${#kinds[@]}-1; i>=0; i--)); do
     from="${froms[i]}"; to="${tos[i]}"
     case "${kinds[i]}" in
+      L)
+        if [[ -L "$from" && "$(readlink "$from")" == "$to" ]]; then
+          rm "$from" || return 1
+        elif [[ -e "$from" || -L "$from" ]]; then
+          log_err "Generated state changed during recovery: $from"; return 1
+        fi
+        ;;
       H)
         [[ ! -d "$from/.git" ]] || git -C "$from" symbolic-ref HEAD "$to" || return 1
         ;;
@@ -809,6 +824,7 @@ hap_init() (
     git -C "$repo" checkout --detach
     init_record W "$repo" "$project_root/workspaces/main/$name"
     git -C "$repo" worktree add "$project_root/workspaces/main/$name" "$branch"
+    setup_workspace_repo "$project_root" "$project_root/workspaces/main" "$name"
   done
   if [[ -f "$INIT_JOURNAL/template" ]]; then
     init_move "$INIT_JOURNAL/template" "$project_root/config/hap.kdl"
