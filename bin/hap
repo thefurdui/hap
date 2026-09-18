@@ -198,6 +198,8 @@ branch_is_protected() {
   case "$branch" in main|master|dev|develop|trunk|stable|release|release/*) return 0 ;; esac
   default_ref=$(git -C "$source" symbolic-ref --quiet refs/remotes/origin/HEAD) || default_ref=""
   [[ -n "$default_ref" && "$branch" == "${default_ref#refs/remotes/origin/}" ]] && return 0
+  configured=$(git -C "$source" config --get hap.baseBranch) || configured=""
+  [[ -n "$configured" && "$branch" == "${configured#refs/heads/}" ]] && return 0
   while IFS= read -r configured; do
     [[ -n "$configured" && "$branch" == "$configured" ]] && return 0
   done < <(git -C "$source" config --get-all hap.protectedBranch)
@@ -569,7 +571,7 @@ prepare_workspace() {
   local project_root="$1" project_name="$2" agent_task="$3" base_branch="$4"
   local editor="$5" target_branch="$6"
   local sources_dir="$project_root/sources" target_ws="$project_root/workspaces/$agent_task"
-  local repo repo_name work branch_name common
+  local repo repo_name work branch_name common base_oid
   validate_workspace_path "$project_root" "$agent_task" || return 1
   discover_sources "$project_root" || return 1
   for meta in .hap-ready .hap-opening; do
@@ -587,8 +589,16 @@ prepare_workspace() {
       else
         [[ ! -e "$work" && ! -L "$work" ]] || { log_err "Incomplete or unknown directory: $work"; return 1; }
         branch_name="${target_branch:-hap/$agent_task}"
-        if ! git -C "$repo" worktree add "$work" -b "$branch_name" "$base_branch"; then
+        git check-ref-format --branch "$branch_name" >/dev/null || return 1
+        if [[ "${FETCH_BASE:-false}" == true ]]; then git -C "$repo" fetch origin || return 1; fi
+        if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch_name"; then
+          [[ "${REUSE_BRANCH:-false}" == true ]] || {
+            log_err "Branch already exists: $branch_name (use --reuse-branch intentionally)"; return 1;
+          }
           git -C "$repo" worktree add "$work" "$branch_name" || return 1
+        else
+          base_oid=$(resolve_base_commit "$repo" "$base_branch") || return 1
+          git -C "$repo" worktree add "$work" -b "$branch_name" "$base_oid" || return 1
         fi
         git -C "$work" push -u origin "$branch_name" || true
       fi
@@ -610,6 +620,16 @@ create_workspace() (
   trap 'exit 143' TERM
   launch_session "$name" "$root/workspaces/$task" "$name-$task" "$root" "$editor" "$profile"
 )
+
+resolve_base_commit() {
+  local repo="$1" candidate="${2:-}"
+  if [[ -z "$candidate" ]]; then candidate=$(git -C "$repo" config --get hap.baseBranch) || candidate=""; fi
+  if [[ -z "$candidate" ]]; then candidate=$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD) || candidate=""; fi
+  if [[ -z "$candidate" ]]; then candidate=$(git -C "$repo" symbolic-ref --quiet HEAD) || candidate=HEAD; fi
+  git -C "$repo" rev-parse --verify --end-of-options "${candidate}^{commit}" || {
+    log_err "Base does not resolve locally: $candidate (fetch explicitly or select -b)"; return 1;
+  }
+}
 
 # --- INIT ---
 
@@ -827,12 +847,16 @@ hap_init() (
 # --- COMMANDS ---
 
 hap_open() {
-  local project="" workspace="" editor="zellij" base_branch="dev" target_branch="" profile=""
+  local project="" workspace="" editor="zellij" base_branch="" target_branch="" profile=""
   local list_profiles=false
   START_UP="false"
+  FETCH_BASE=false
+  REUSE_BRANCH=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+    --fetch) FETCH_BASE=true; shift ;;
+    --reuse-branch) REUSE_BRANCH=true; shift ;;
     -u)
       START_UP="true"
       shift

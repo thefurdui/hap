@@ -297,7 +297,7 @@ class HapTests(unittest.TestCase):
         self.git(other, "branch", "-m", "main")
         self.git(other, "update-ref", "-d", "refs/remotes/origin/dev")
         self.register()
-        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertNotEqual(self.hap("open", "project", "task", "-b", "dev", check=False).returncode, 0)
         work = self.project / "workspaces/task"
         self.assertFalse((work / ".hap-ready").exists())
         self.git(other, "branch", "dev", "main")
@@ -375,6 +375,22 @@ class HapTests(unittest.TestCase):
         self.register()
         self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
         self.assertFalse((self.project / "workspaces").exists())
+
+    def test_default_base_uses_repository_branch(self):
+        source = self.repo()
+        self.git(source, "branch", "-m", "main")
+        self.register()
+        self.hap("open", "project", "task")
+        work = self.project / "workspaces/task/app"
+        self.assertEqual(self.git(work, "branch", "--show-current").stdout.strip(), "hap/task")
+
+    def test_existing_branch_requires_explicit_reuse(self):
+        source = self.repo()
+        self.git(source, "branch", "hap/task")
+        self.register()
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.hap("open", "project", "task", "--reuse-branch")
+        self.assertTrue((self.project / "workspaces/task/app/.git").exists())
 
 
 if __name__ == "__main__":
