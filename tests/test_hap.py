@@ -239,6 +239,17 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
         self.assertFalse((self.project / "sources").exists())
 
+    def test_init_requires_stopped_state_and_keeps_sqlite_companions(self):
+        self.repo(self.project, {"file.txt": "x", ".gitignore": "*.sqlite*\n"})
+        names = ["dev.sqlite", "dev.sqlite-wal", "dev.sqlite-shm", "dev.sqlite-journal"]
+        for name in names:
+            (self.project / name).write_text(name)
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertTrue((self.project / ".git").exists())
+        self.hap("init", "app", "--state-stopped")
+        for name in names:
+            self.assertEqual((self.project / "data/app" / name).read_text(), name)
+
 
 if __name__ == "__main__":
     unittest.main()

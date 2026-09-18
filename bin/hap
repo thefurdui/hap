@@ -122,7 +122,10 @@ extract_data_state() {
   (
     cd "$repo_path" || return
     find . \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name build \) -prune \
-      -o \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db-wal' -o -name '*.db-shm' -o -name '*.log' \) -type f -print
+      -o \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \
+      -o -name '*.db-wal' -o -name '*.sqlite-wal' -o -name '*.sqlite3-wal' \
+      -o -name '*.db-shm' -o -name '*.sqlite-shm' -o -name '*.sqlite3-shm' \
+      -o -name '*.db-journal' -o -name '*.sqlite-journal' -o -name '*.sqlite3-journal' -o -name '*.log' \) -type f -print
   ) | while IFS= read -r file; do
     local clean_file="${file#./}"
     local dest_file="$dest_dir/$clean_file"
@@ -668,9 +671,19 @@ recover_init() {
 
 hap_init() (
   set -e -o pipefail
-  local project_root project_name="${1:-}" repo name branch item shared_files data_files
+  local project_root project_name="" repo name branch item shared_files data_files
+  local state_stopped=false recover=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --state-stopped) state_stopped=true ;;
+      --recover) recover=true ;;
+      -*) log_err "Unknown init option: $1"; return 1 ;;
+      *) [[ -z "$project_name" ]] || { log_err "Unexpected argument: $1"; return 1; }; project_name="$1" ;;
+    esac
+    shift
+  done
   project_root=$(pwd -P)
-  if [[ "$project_name" == --recover ]]; then
+  if [[ "$recover" == true ]]; then
     recover_init "$project_root"
     return
   fi
@@ -712,6 +725,14 @@ hap_init() (
       return 1
     }
     while IFS= read -r -d '' ignored; do
+      case "${ignored##*/}" in
+        *.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal)
+          [[ "$state_stopped" == true ]] || {
+            log_err "Stop database users, then rerun init --state-stopped: $repo/$ignored"
+            return 1
+          }
+          ;;
+      esac
       case "${ignored##*/}" in
         .env|.env.*|*.pem|*.crt|*.key|*.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal|*.log) ;;
         *) log_err "Preserve or remove ignored files before init: $repo/$ignored"; return 1 ;;
