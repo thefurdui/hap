@@ -4,7 +4,7 @@
 # https://github.com/thefurdui/hap
 # License: MIT
 
-set -e
+set -e -o pipefail
 
 # --- CONFIG ---
 APP_NAME="hap"
@@ -89,6 +89,40 @@ ignore_generated_path() {
   grep -Fxq -- "/$pattern" "$exclude" 2>/dev/null || printf '\n/%s\n' "$pattern" >> "$exclude"
 }
 
+# Check producer status before iterating NUL-delimited paths. Process substitution
+# alone would hide an inspection failure from the destructive caller.
+for_each_ignored_file() (
+  local repo="$1" callback="$2" list relative
+  shift 2
+  list=$(mktemp) || return 1
+  trap 'rm -f "$list"' EXIT
+  git -C "$repo" ls-files --others --ignored --exclude-standard -z > "$list" || return 1
+  while IFS= read -r -d '' relative; do
+    "$callback" "$@" "$relative" || return 1
+  done < "$list"
+)
+
+check_ignored_state() {
+  local repo="$1" manifest="$2" relative="$3"
+  managed_lookup "$manifest" "$relative" || { log_err "Preserving ignored file: $repo/$relative"; return 1; }
+  managed_matches "$repo" "$relative" "$MANAGED_KIND" "$MANAGED_VALUE"
+}
+
+preflight_ignored_state() {
+  local repo="$1" stopped="$2" relative="$3"
+  [[ "$relative" != *$'\n'* && "$relative" != *$'\r'* ]] || { log_err "State paths cannot contain line breaks"; return 1; }
+  [[ ! -L "$repo/$relative" ]] || { log_err "Preserve ignored symlinks before init: $relative"; return 1; }
+  case "${relative##*/}" in
+    *.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal)
+      [[ "$stopped" == true ]] || { log_err "Stop database users, then rerun init --state-stopped: $relative"; return 1; }
+      ;;
+  esac
+  case "${relative##*/}" in
+    .env|.env.*|*.pem|*.crt|*.key|*.db|*.sqlite|*.sqlite3|*.db-wal|*.sqlite-wal|*.sqlite3-wal|*.db-shm|*.sqlite-shm|*.sqlite3-shm|*.db-journal|*.sqlite-journal|*.sqlite3-journal|*.log) ;;
+    *) log_err "Preserve or remove ignored files before init: $repo/$relative"; return 1 ;;
+  esac
+}
+
 # Directories to exclude when scanning for state files
 STATE_EXCLUDE_DIRS="node_modules vendor .git dist build"
 
@@ -121,14 +155,14 @@ extract_shared_state() {
     cd "$repo_path" || return
     # Find config files, excluding build/vendor dirs
     find . \( -name node_modules -o -name vendor -o -name .git -o -name dist -o -name build \) -prune \
-      -o \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -type f -print
-  ) | while IFS= read -r file; do
+      -o \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -type f -print0
+  ) | while IFS= read -r -d '' file; do
     local clean_file="${file#./}"
     git -C "$repo_path" check-ignore --quiet -- "$clean_file" || continue
     local dest_file="$dest_dir/$clean_file"
     init_mkdir "$(dirname "$dest_file")" || return 1
     init_move "$repo_path/$clean_file" "$dest_file" || return 1
-    echo "$clean_file"
+    printf '%s\n' "$clean_file"
   done
 }
 
@@ -145,14 +179,14 @@ extract_data_state() {
       -o \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \
       -o -name '*.db-wal' -o -name '*.sqlite-wal' -o -name '*.sqlite3-wal' \
       -o -name '*.db-shm' -o -name '*.sqlite-shm' -o -name '*.sqlite3-shm' \
-      -o -name '*.db-journal' -o -name '*.sqlite-journal' -o -name '*.sqlite3-journal' -o -name '*.log' \) -type f -print
-  ) | while IFS= read -r file; do
+      -o -name '*.db-journal' -o -name '*.sqlite-journal' -o -name '*.sqlite3-journal' -o -name '*.log' \) -type f -print0
+  ) | while IFS= read -r -d '' file; do
     local clean_file="${file#./}"
     git -C "$repo_path" check-ignore --quiet -- "$clean_file" || continue
     local dest_file="$dest_dir/$clean_file"
     init_mkdir "$(dirname "$dest_file")" || return 1
     init_move "$repo_path/$clean_file" "$dest_file" || return 1
-    echo "$clean_file"
+    printf '%s\n' "$clean_file"
   done
 }
 
@@ -241,10 +275,7 @@ cleanup_workspace() {
     [[ -z "$status" ]] || { log_warn "Preserving $repo — local or ignored files present"; return 1; }
     manifest="$ws_path/.hap-state/$repo_name"
     check_managed_state "$repo" "$manifest" || return 1
-    while IFS= read -r -d '' ignored; do
-      managed_lookup "$manifest" "$ignored" || { log_err "Preserving ignored file: $repo/$ignored"; return 1; }
-      managed_matches "$repo" "$ignored" "$MANAGED_KIND" "$MANAGED_VALUE" || return 1
-    done < <(git -C "$repo" ls-files --others --ignored --exclude-standard -z)
+    for_each_ignored_file "$repo" check_ignored_state "$repo" "$manifest" || return 1
     tip=$(git -C "$repo" rev-parse --verify HEAD) || return 1
     branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || branch=""
     if [[ -n "$branch" ]] && branch_is_protected "$source_repo" "$branch"; then
@@ -586,7 +617,7 @@ setup_workspace_repo() {
     (
       umask 077
       cd "$shared" || exit 1
-      find . -type f | while IFS= read -r file; do
+      find . -type f -print0 | while IFS= read -r -d '' file; do
         local clean_file="${file#./}" ups="../../../" subdir kind value lookup
         local dest="$work/$clean_file"
         subdir=$(dirname "$clean_file")
@@ -872,7 +903,7 @@ hap_init() (
     for item in "$project_root"/sources "$project_root"/workspaces "$project_root"/shared "$project_root"/data "$project_root"/config; do
       [[ ! -e "$item" && ! -L "$item" ]] || { log_err "Reserved directory already exists: $item"; return 1; }
     done
-    for item in "$project_root"/*; do
+    for item in "$project_root"/* "$project_root"/.[!.]* "$project_root"/..?*; do
       [[ ! -f "$item/.git" && ! -L "$item/.git" ]] || { log_err "Linked repositories are not supported by init: $item"; return 1; }
       [[ -d "$item/.git" && ! -L "$item" ]] || continue
       name="${item##*/}"
@@ -903,20 +934,7 @@ hap_init() (
       log_err "Commit or preserve local changes and untracked files before init: $repo"
       return 1
     }
-    while IFS= read -r -d '' ignored; do
-      case "${ignored##*/}" in
-        *.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal)
-          [[ "$state_stopped" == true ]] || {
-            log_err "Stop database users, then rerun init --state-stopped: $repo/$ignored"
-            return 1
-          }
-          ;;
-      esac
-      case "${ignored##*/}" in
-        .env|.env.*|*.pem|*.crt|*.key|*.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal|*.log) ;;
-        *) log_err "Preserve or remove ignored files before init: $repo/$ignored"; return 1 ;;
-      esac
-    done < <(git -C "$repo" ls-files --others --ignored --exclude-standard -z)
+    for_each_ignored_file "$repo" preflight_ignored_state "$repo" "$state_stopped" || return 1
     branches+=("$branch")
   done
 

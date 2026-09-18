@@ -535,6 +535,33 @@ class HapTests(unittest.TestCase):
         self.hap("unlock", "project", "task")
         self.assertFalse(marker.exists())
 
+    def test_shared_state_preserves_filename_whitespace(self):
+        self.repo()
+        self.register()
+        shared = self.project / "shared/app"
+        shared.mkdir(parents=True)
+        name = " leading and trailing "
+        (shared / name).write_text("contents")
+        self.hap("open", "project", "task")
+        work = self.project / "workspaces/task/app"
+        self.assertEqual((work / name).read_text(), "contents")
+        self.hap("clean", "project", "task")
+        self.assertFalse(work.exists())
+
+    def test_init_rejects_state_line_breaks_before_moving(self):
+        self.repo(self.project, {"file.txt": "x", ".gitignore": ".env*\n"})
+        name = ".env.local\nextra"
+        (self.project / name).write_text("config")
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertTrue((self.project / ".git").exists())
+        self.assertTrue((self.project / name).exists())
+
+    def test_failed_ignored_inventory_preserves_workspace(self):
+        _, work = self.workspace()
+        self.stub("git", f'if [ "$3" = ls-files ]; then exit 42; fi\nexec "{GIT}" "$@"')
+        self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
