@@ -166,7 +166,7 @@ print_state_extraction_summary() {
   done <<< "$shared_files"
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
-    printf 'Data: %s -> %s/data/%s/%s\n' "$file" "$root" "$repo_name" "$file"
+    printf 'Data: %s -> %s/data/workspaces/main/%s/%s\n' "$file" "$root" "$repo_name" "$file"
   done <<< "$data_files"
   if [[ -n "$data_files" ]]; then
     log_info "Configure database paths explicitly; relative paths depend on your application, not the env file location."
@@ -450,6 +450,8 @@ launch_session() {
   }
 
   cd "$workspace_path" || exit 1
+  HAP_DATA_DIR=$(workspace_data_path "$project_root" "${workspace_path##*/}") || return 1
+  export HAP_DATA_DIR
 
   log_info "Launching $project_name with $editor..."
 
@@ -569,6 +571,10 @@ setup_workspace_repo() {
   local project_root="$1" target_ws="$2" repo_name="$3"
   local work="$target_ws/$repo_name" shared="$project_root/shared/$repo_name"
   local metadata="$target_ws/.hap-state" manifest="$target_ws/.hap-state/$repo_name"
+  local data_path
+  data_path=$(workspace_data_path "$project_root" "${target_ws##*/}") || return 1
+  safe_destination "$project_root" "${data_path#"$project_root"/}/$repo_name" || return 1
+  if [[ -n "${INIT_JOURNAL:-}" ]]; then init_mkdir "$data_path/$repo_name" || return 1; else mkdir -p "$data_path/$repo_name" || return 1; fi
   [[ ! -L "$metadata" && ! -L "$manifest" ]] || { log_err "Unsafe generated-state metadata"; return 1; }
   if [[ -n "${INIT_JOURNAL:-}" ]]; then init_mkdir "$metadata" || return 1; else mkdir -p "$metadata" || return 1; fi
   chmod 700 "$metadata" || return 1
@@ -627,6 +633,14 @@ setup_workspace_repo() {
   elif [[ -f "$work/go.mod" ]]; then
     (cd "$work" && go mod download) || return 1
   fi
+}
+
+workspace_data_path() {
+  local root="$1" workspace="$2" relative="data/workspaces/$2"
+  [[ "${SHARED_DATA:-false}" != true ]] || relative="data/shared"
+  validate_name "$workspace" workspace || return 1
+  safe_destination "$root" "$relative" || return 1
+  printf '%s/%s\n' "$root" "$relative"
 }
 
 with_project_lock() (
@@ -928,7 +942,7 @@ hap_init() (
     fi
     repo="$project_root/sources/$name"
     shared_files=$(extract_shared_state "$repo" "$project_root/shared/$name")
-    data_files=$(extract_data_state "$repo" "$project_root/data/$name")
+    data_files=$(extract_data_state "$repo" "$project_root/data/workspaces/main/$name")
     shared_reports+=("$shared_files")
     data_reports+=("$data_files")
     init_record H "$repo" "refs/heads/$branch"
@@ -962,10 +976,12 @@ hap_open() {
   FETCH_BASE=false
   REUSE_BRANCH=false
   SHARED_CONFIG=false
+  SHARED_DATA=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
     --shared-config) SHARED_CONFIG=true; shift ;;
+    --shared-data) SHARED_DATA=true; shift ;;
     --fetch) FETCH_BASE=true; shift ;;
     --reuse-branch) REUSE_BRANCH=true; shift ;;
     -u)

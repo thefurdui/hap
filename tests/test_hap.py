@@ -249,7 +249,7 @@ class HapTests(unittest.TestCase):
         self.assertTrue((self.project / ".git").exists())
         self.hap("init", "app", "--state-stopped")
         for name in names:
-            self.assertEqual((self.project / "data/app" / name).read_text(), name)
+            self.assertEqual((self.project / "data/workspaces/main/app" / name).read_text(), name)
 
     def test_init_keeps_tracked_state_examples_in_git(self):
         self.repo(self.project, {".env.example": "example", "fixture.sqlite": "fixture"})
@@ -486,6 +486,21 @@ class HapTests(unittest.TestCase):
         self.register()
         self.hap("open", "project", "task", "--shared-config")
         self.assertTrue((self.project / "workspaces/task/app/.env").is_symlink())
+
+    def test_data_paths_are_isolated_and_retained_on_cleanup(self):
+        self.repo()
+        self.register()
+        self.stub("zellij", 'if [ "$1" = list-sessions ]; then exit 0; fi\nprintf "%s\\n" "$HAP_DATA_DIR" >> "$HAP_TEST_LOG"')
+        self.hap("open", "project", "one")
+        self.hap("open", "project", "two")
+        paths = (self.base / "commands.log").read_text().splitlines()
+        self.assertNotEqual(paths[0], paths[-1])
+        data = self.project / "data/workspaces/one/app/dev.db"
+        data.write_text("retained database")
+        self.hap("clean", "project", "one")
+        self.assertEqual(data.read_text(), "retained database")
+        self.hap("open", "project", "three", "--shared-data")
+        self.assertTrue((self.project / "data/shared/app").is_dir())
 
 
 if __name__ == "__main__":
