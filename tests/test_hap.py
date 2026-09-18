@@ -569,6 +569,28 @@ class HapTests(unittest.TestCase):
         target = Path(self.env["XDG_DATA_HOME"]) / "hap/templates/hap.kdl"
         self.assertEqual(target.read_bytes(), (ROOT / "templates/hap.kdl").read_bytes())
 
+    def test_unsupported_editor_fails_before_workspace_creation(self):
+        self.repo()
+        self.register()
+        self.assertNotEqual(self.hap("open", "project", "task", "-e", "bash", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces").exists())
+
+    def test_profiles_do_not_require_an_editor_or_fzf(self):
+        self.register()
+        profiles = self.project / "config/profiles"
+        profiles.mkdir(parents=True)
+        (profiles / "basic.kdl").write_text("layout {}")
+        result = self.hap("open", "project", "-e", "not-installed", "-p")
+        self.assertEqual(result.stdout.strip(), "basic")
+
+    def test_missing_package_tool_fails_before_workspace_creation(self):
+        self.repo(files={"file.txt": "x", "pnpm-lock.yaml": "fixture"})
+        self.register()
+        (self.stubs / "bash").symlink_to(shutil.which("bash"))
+        self.env["PATH"] = str(self.stubs) + ":/usr/bin:/bin"
+        self.assertNotEqual(self.hap("open", "project", "task", "--install", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

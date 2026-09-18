@@ -5,6 +5,10 @@
 # License: MIT
 
 set -e -o pipefail
+if ((BASH_VERSINFO[0] < 4)); then
+  printf 'hap requires Bash 4 or newer on PATH\n' >&2
+  exit 1
+fi
 
 # --- CONFIG ---
 APP_NAME="hap"
@@ -388,21 +392,38 @@ cleanup_project_workspaces() {
 
 # --- SETUP ---
 
+require_commands() {
+  local cmd
+  for cmd in "$@"; do
+    command -v "$cmd" >/dev/null 2>&1 || { log_err "Missing dependency: $cmd"; return 1; }
+  done
+}
+
+require_git() {
+  require_commands git || return 1
+  local version major minor
+  version=$(git --version) || return 1
+  version="${version#git version }"
+  major="${version%%.*}"; version="${version#*.}"; minor="${version%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  ((major > 2 || (major == 2 && minor >= 31))) || { log_err "Git 2.31 or newer is required"; return 1; }
+}
+
 ensure_setup() {
   local editor="${1:-zellij}"
-  mkdir -p "$DATA_DIR"
-  [[ ! -f "$DB_FILE" ]] && touch "$DB_FILE" || true
+  case "$editor" in zellij|cursor|antigravity) ;; *) log_err "Unsupported editor: $editor"; return 1 ;; esac
+  require_git || return 1
+  require_commands "$editor" find awk mktemp || return 1
+  ensure_db
+}
 
-  for cmd in fzf git; do
-    if ! command -v "$cmd" &>/dev/null; then
-      log_err "Missing dependency: $cmd"
-      exit 1
-    fi
-  done
-
-  if ! command -v "$editor" &>/dev/null; then
-    log_err "Missing dependency: $editor"
-    exit 1
+require_dependency_tools() {
+  local repo="$1" ref="$2"
+  [[ "${INSTALL_DEPS:-false}" == true ]] || return 0
+  if git -C "$repo" cat-file -e "$ref:pnpm-lock.yaml" 2>/dev/null; then
+    require_commands pnpm
+  elif git -C "$repo" cat-file -e "$ref:go.mod" 2>/dev/null; then
+    require_commands go
   fi
 }
 
@@ -664,8 +685,10 @@ setup_workspace_repo() {
   fi
   [[ "${INSTALL_DEPS:-false}" == true ]] || return 0
   if [[ -f "$work/pnpm-lock.yaml" ]]; then
+    require_commands pnpm || return 1
     (cd "$work" && pnpm install --frozen-lockfile) || return 1
   elif [[ -f "$work/go.mod" ]]; then
+    require_commands go || return 1
     (cd "$work" && go mod download) || return 1
   fi
 }
@@ -718,6 +741,22 @@ prepare_workspace() {
   local repo repo_name work branch_name common base_oid
   validate_workspace_path "$project_root" "$agent_task" || return 1
   discover_sources "$project_root" || return 1
+  # Check tools for the selected commits before creating any workspace directory.
+  for repo in "${SOURCE_REPOS[@]}"; do
+    work="$target_ws/${repo##*/}"
+    if [[ "${FETCH_BASE:-false}" == true ]]; then git -C "$repo" fetch origin || return 1; fi
+    if [[ -e "$work/.git" ]]; then
+      require_dependency_tools "$work" HEAD || return 1
+    else
+      branch_name="${target_branch:-hap/$agent_task}"
+      if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch_name"; then
+        base_oid="refs/heads/$branch_name"
+      else
+        base_oid=$(resolve_base_commit "$repo" "$base_branch") || return 1
+      fi
+      require_dependency_tools "$repo" "$base_oid" || return 1
+    fi
+  done
   for meta in .hap-ready .hap-opening; do
     [[ ! -L "$target_ws/$meta" ]] || { log_err "Unsafe workspace metadata: $meta"; return 1; }
   done
@@ -734,7 +773,6 @@ prepare_workspace() {
         [[ ! -e "$work" && ! -L "$work" ]] || { log_err "Incomplete or unknown directory: $work"; return 1; }
         branch_name="${target_branch:-hap/$agent_task}"
         git check-ref-format --branch "$branch_name" >/dev/null || return 1
-        if [[ "${FETCH_BASE:-false}" == true ]]; then git -C "$repo" fetch origin || return 1; fi
         if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch_name"; then
           [[ "${REUSE_BRANCH:-false}" == true ]] || {
             log_err "Branch already exists: $branch_name (use --reuse-branch intentionally)"; return 1;
@@ -888,7 +926,8 @@ hap_init() (
   fi
   project_name="${project_name:-${project_root##*/}}"
   validate_name "$project_name" project || return 1
-  command -v git >/dev/null || { log_err "Missing dependency: git"; return 1; }
+  require_git || return 1
+  require_commands find awk mktemp || return 1
   INIT_JOURNAL="$project_root/.hap-init-journal"
   [[ ! -e "$INIT_JOURNAL" && ! -L "$INIT_JOURNAL" ]] || {
     log_err "An unfinished initialization exists. Inspect it, then run hap init --recover"; return 1;
@@ -1066,7 +1105,7 @@ hap_open() {
     exit 1
   fi
 
-  ensure_setup "$editor"
+  ensure_db || return 1
 
   validate_name "$project" project || return 1
 
@@ -1092,6 +1131,7 @@ hap_open() {
     resolve_layout_file "$path_to_root" "$profile" >/dev/null || exit 1
   fi
 
+  ensure_setup "$editor" || return 1
   if [[ -n "$workspace" ]]; then
     create_workspace "$path_to_root" "$project" "$workspace" "$base_branch" "$editor" "$target_branch" "$profile"
   else
@@ -1212,6 +1252,7 @@ hap_clean() {
     exit 1
   fi
 
+  require_git || return 1
   with_project_lock "$path_to_root" cleanup_project_workspaces "$path_to_root" "$workspace" "$project"
 }
 
@@ -1221,7 +1262,11 @@ hap_list() {
     log_warn "No projects registered. Use 'hap init' to get started."
     exit 0
   fi
-  column -t -s "|" "$DB_FILE"
+  registry_validate || return 1
+  local name path
+  while IFS='|' read -r name path; do
+    [[ -z "$name" ]] || printf '%-20s %s\n' "$name" "$path"
+  done < "$DB_FILE"
 }
 
 # Explicitly acknowledge that a crashed/legacy GUI session is no longer in use.
@@ -1251,6 +1296,7 @@ unlock_workspace() {
 }
 
 hap_interactive() {
+  require_commands fzf || return 1
   ensure_setup "zellij"
   START_UP="false"
 
@@ -1265,7 +1311,7 @@ hap_interactive() {
     local name path_to_root
     name=$(echo "$selection" | cut -d '|' -f 1)
     path_to_root=$(echo "$selection" | cut -d '|' -f 2)
-    launch_session "$name" "$path_to_root/workspaces/main" "$name-main" "$path_to_root" "zellij"
+    hap_open "$name"
   fi
 }
 

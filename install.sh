@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+((BASH_VERSINFO[0] >= 4)) || { printf 'Install Bash 4 or newer first\n' >&2; exit 1; }
 
 # Select a release tag or an immutable commit. Never mix files from mutable main.
 REF="${HAP_INSTALL_REF:-v1.2.0}"

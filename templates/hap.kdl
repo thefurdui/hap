@@ -1,6 +1,4 @@
 layout {
-    // Status bar — shows session name and mode.
-    // Remove this block if you want full-screen real estate.
     default_tab_template {
         children
         pane size=1 borderless=true {
@@ -8,61 +6,21 @@ layout {
         }
     }
 
-    // Tab 1: Code
-    // Your editor(s) + CLI agent side by side.
-    // Adapt the cwd paths to match your repo names in sources/.
+    // Workspace root: each source repository is a child directory.
+    // Customize command/cwd here, e.g. command="nvim" cwd="./app".
     tab name="code" focus=true {
-        pane split_direction="vertical" {
-            pane size="70%" stacked=true {
-                pane name="nvim-fe" command="nvim" cwd="./frontend" focus=true
-                pane name="nvim-be" command="nvim" cwd="./backend"
-            }
-            // Agent slot. Wrapped in zsh so Ctrl+C doesn't kill the pane.
-            // Change "claude" to your agent of choice.
-            pane name="agent" command="zsh" {
-                args "-c" "claude; exec zsh"
-            }
-        }
+        pane name="code" command="bash"
+        pane name="agent" command="bash"
     }
 
-    // Tab 2: Servers
-    // Always present in every session (main and workspaces alike).
-    //
-    // How -u works:
-    //   hap open project -u              → HAP_UP=1 → server commands run on session start
-    //   hap open project                 → HAP_UP unset → panes open to a ready shell
-    //   hap open project -p auth-beat    → load config/profiles/auth-beat.kdl instead of hap.kdl
-    //
-    // The -u flag only matters when the session is first created.
-    // After that, everything is manual inside the living zellij session:
-    //   - Ctrl+C to stop a server
-    //   - Type the command (or up-arrow) to start it again
-    //   - Switch to another session's servers tab and do the same
-    //
-    // Replace the placeholder commands below with your actual start commands.
-    // e.g. "go run .", "cargo run", "pnpm dev", "npm start"
+    // Replace the printf with your start command and set the repository cwd.
+    // HAP_UP is set only for `hap open -u`; it affects new sessions only.
+    // HAP_DATA_DIR is the selected workspace data root. Applications must use it
+    // explicitly, e.g. DB_PATH="$HAP_DATA_DIR/app/dev.db" ./start-server.
     tab name="servers" {
-        pane split_direction="vertical" {
-            // Left: Backend
-            pane stacked=true {
-                // Server pane. Replace the echo with your real start command.
-                // Example: args "-c" "if [ \"$HAP_UP\" = \"1\" ]; then go run .; fi; exec zsh"
-                pane name="server" command="zsh" cwd="./backend" {
-                    args "-c" "if [ \"$HAP_UP\" = \"1\" ]; then echo 'Starting backend...'; fi; exec zsh"
-                }
-                pane name="git" command="lazygit" cwd="./backend"
-                pane name="shell" command="zsh" cwd="./backend" focus=true
-            }
-            // Right: Frontend
-            pane stacked=true {
-                // Server pane. Replace the echo with your real start command.
-                // Example: args "-c" "if [ \"$HAP_UP\" = \"1\" ]; then pnpm dev; fi; exec zsh"
-                pane name="server" command="zsh" cwd="./frontend" {
-                    args "-c" "if [ \"$HAP_UP\" = \"1\" ]; then echo 'Starting frontend...'; fi; exec zsh"
-                }
-                pane name="git" command="lazygit" cwd="./frontend"
-                pane name="shell" command="zsh" cwd="./frontend" focus=true
-            }
+        pane name="server" command="bash" {
+            args "-c" "if [ \"$HAP_UP\" = \"1\" ]; then printf 'Set your server command in config/hap.kdl\\n'; fi; exec bash"
         }
+        pane name="shell" command="bash"
     }
 }
