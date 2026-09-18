@@ -201,6 +201,27 @@ cleanup_workspace() {
 
   [[ ! -d "$ws_path" ]] && return 0
 
+  # Keep branch refs. Detached tips need an explicit ref before removing their reflog.
+  local repo tip branch remote_tip remote_ref
+  for repo in "$ws_path"/*; do
+    [[ -e "$repo/.git" ]] || continue
+    tip=$(git -C "$repo" rev-parse --verify HEAD) || return 1
+    if ! branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD); then
+      local recovery="refs/hap/recovery/$(basename "$ws_path")/$(basename "$repo")-$tip"
+      git -C "$repo" update-ref "$recovery" "$tip" || return 1
+      log_info "Preserved detached history at $recovery"
+    elif [[ "$delete_remote" == true ]]; then
+      remote_ref="refs/heads/$branch"
+      remote_tip=$(git -C "$repo" ls-remote --exit-code --heads origin "$remote_ref") || {
+        log_err "Cannot verify remote branch: $branch"; return 1;
+      }
+      remote_tip="${remote_tip%%$'\t'*}"
+      [[ "$remote_tip" == "$tip" ]] || {
+        log_err "Remote branch differs from preserved local history: $branch"; return 1;
+      }
+    fi
+  done
+
   # Check for uncommitted changes
   if [[ "$delete_remote" != "true" ]]; then
     for repo in "$ws_path"/*; do
@@ -260,11 +281,12 @@ cleanup_workspace() {
       if [[ -d "$source_repo" ]]; then
         if [[ "$delete_remote" == "true" ]]; then
           log_info "Deleting remote branch $branch for $repo_name..."
-          git -C "$source_repo" push origin --delete "$branch" 2>/dev/null || true
+          tip=$(git -C "$source_repo" rev-parse "refs/heads/$branch") || return 1
+          git -C "$source_repo" push --force-with-lease="refs/heads/$branch:$tip" origin ":refs/heads/$branch" || return 1
         fi
         if [[ "$delete_local" == "true" ]]; then
           log_info "Deleting local branch $branch for $repo_name..."
-          git -C "$source_repo" branch -D "$branch" 2>/dev/null || true
+          log_info "Keeping local branch $branch to preserve history"
         fi
       fi
     done
@@ -293,7 +315,7 @@ cleanup_project_workspaces() {
     fi
   fi
 
-  local delete_local="true"
+  local delete_local="false"
   local delete_remote="$DELETE_REMOTE"
 
   if [[ -n "$task" ]]; then

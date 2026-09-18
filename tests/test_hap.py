@@ -126,6 +126,25 @@ class HapTests(unittest.TestCase):
         self.assertEqual((outside / ".env").read_text(), "unrelated")
         self.assertFalse((outside / ".env").is_symlink())
 
+    def test_cleanup_preserves_unique_branch_history(self):
+        source, work = self.workspace()
+        (work / "file.txt").write_text("unique work")
+        self.git(work, "commit", "-qam", "unique")
+        tip = self.git(work, "rev-parse", "HEAD").stdout.strip()
+        self.hap("clean", "project", "task")
+        self.assertFalse(work.exists())
+        self.assertEqual(self.git(source, "rev-parse", "hap/task").stdout.strip(), tip)
+
+    def test_cleanup_preserves_detached_history(self):
+        source, work = self.workspace()
+        self.git(work, "checkout", "--detach", "-q")
+        (work / "file.txt").write_text("detached work")
+        self.git(work, "commit", "-qam", "detached")
+        tip = self.git(work, "rev-parse", "HEAD").stdout.strip()
+        self.hap("clean", "project", "task")
+        refs = self.git(source, "for-each-ref", "--format=%(objectname)", "refs/hap/recovery").stdout
+        self.assertIn(tip, refs)
+
 
 if __name__ == "__main__":
     unittest.main()
