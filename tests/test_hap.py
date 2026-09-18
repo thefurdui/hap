@@ -1,5 +1,6 @@
 """Integration regressions: all state and Git operations stay in temporary fixtures."""
 import os
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -410,6 +411,42 @@ class HapTests(unittest.TestCase):
         self.stub("git", f'if [ "$3" = push ]; then exit 9; fi\nexec "{GIT}" "$@"')
         self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
         self.assertFalse((self.project / "workspaces/task/.hap-ready").exists())
+
+    def installer_fixture(self):
+        downloads = self.base / "downloads"
+        downloads.mkdir()
+        manifest = []
+        for relative in ("bin/hap", "templates/hap.kdl"):
+            body = (ROOT / relative).read_bytes()
+            (downloads / Path(relative).name).write_bytes(body)
+            manifest.append(f"{hashlib.sha256(body).hexdigest()}  {relative}\n")
+        (downloads / "SHA256SUMS").write_text("".join(manifest))
+        self.env.update(HAP_TEST_DOWNLOAD=str(downloads), HAP_BIN_DIR=str(self.base / "installed/bin"),
+                        HAP_DATA_DIR=str(self.base / "installed/data"))
+        self.stub("curl", 'out=""\nwhile [ "$#" -gt 0 ]; do\n if [ "$1" = --output ]; then out="$2"; shift 2; else url="$1"; shift; fi\ndone\nfile="${url##*/}"\n[ "$file" != "${HAP_TEST_FAIL_DOWNLOAD:-}" ] || exit 22\ncp "$HAP_TEST_DOWNLOAD/$file" "$out"')
+        executable = Path(self.env["HAP_BIN_DIR"]) / "hap"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("old executable")
+        return downloads, executable
+
+    def test_installer_preserves_install_on_download_failure(self):
+        _, executable = self.installer_fixture()
+        self.env["HAP_TEST_FAIL_DOWNLOAD"] = "hap.kdl"
+        self.assertNotEqual(self.run_cmd(["bash", ROOT / "install.sh"], check=False).returncode, 0)
+        self.assertEqual(executable.read_text(), "old executable")
+
+    def test_installer_verifies_checksums_before_replacement(self):
+        downloads, executable = self.installer_fixture()
+        (downloads / "hap").write_text("corrupt")
+        self.assertNotEqual(self.run_cmd(["bash", ROOT / "install.sh"], check=False).returncode, 0)
+        self.assertEqual(executable.read_text(), "old executable")
+
+    def test_installer_installs_verified_pair(self):
+        _, executable = self.installer_fixture()
+        self.run_cmd(["bash", ROOT / "install.sh"])
+        self.assertEqual(executable.read_bytes(), HAP.read_bytes())
+        self.assertEqual((Path(self.env["HAP_DATA_DIR"]) / "templates/hap.kdl").read_bytes(),
+                         (ROOT / "templates/hap.kdl").read_bytes())
 
 
 if __name__ == "__main__":
