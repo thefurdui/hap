@@ -188,6 +188,20 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("clean", "project", check=False).returncode, 0)
         self.assertTrue(work.exists())
 
+    def test_targeted_cleanup_preserves_main_and_active_workspaces(self):
+        _, work = self.workspace("main")
+        self.assertNotEqual(self.hap("clean", "project", "main", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+        work.parent.rename(work.parent.with_name("task"))
+        self.env["HAP_TEST_SESSIONS"] = "project-task"
+        self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
+
+    def test_targeted_cleanup_preserves_protected_branch(self):
+        _, work = self.workspace()
+        self.git(work, "switch", "-c", "main")
+        self.assertNotEqual(self.hap("clean", "project", "task", check=False).returncode, 0)
+        self.assertTrue(work.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

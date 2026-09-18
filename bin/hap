@@ -203,6 +203,17 @@ workspace_is_active() {
   zellij_session_exists "$project_name-${ws_path##*/}"
 }
 
+branch_is_protected() {
+  local source="$1" branch="$2" default_ref configured
+  case "$branch" in main|master|dev|develop|trunk|stable|release|release/*) return 0 ;; esac
+  default_ref=$(git -C "$source" symbolic-ref --quiet refs/remotes/origin/HEAD) || default_ref=""
+  [[ -n "$default_ref" && "$branch" == "${default_ref#refs/remotes/origin/}" ]] && return 0
+  while IFS= read -r configured; do
+    [[ -n "$configured" && "$branch" == "$configured" ]] && return 0
+  done < <(git -C "$source" config --get-all hap.protectedBranch)
+  return 1
+}
+
 # --- CLEANUP FUNCTIONS ---
 
 cleanup_workspace() {
@@ -232,6 +243,10 @@ cleanup_workspace() {
     [[ -z "$status" ]] || { log_warn "Preserving $repo — local or ignored files present"; return 1; }
     tip=$(git -C "$repo" rev-parse --verify HEAD) || return 1
     branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || branch=""
+    if [[ -n "$branch" ]] && branch_is_protected "$source_repo" "$branch"; then
+      log_err "Preserving protected branch: $branch"
+      return 1
+    fi
     if [[ "$delete_remote" == true && -n "$branch" ]]; then
       remote_tip=$(git -C "$repo" ls-remote --exit-code --heads origin "refs/heads/$branch") || {
         log_err "Cannot verify remote branch: $branch"; return 1;
@@ -289,13 +304,20 @@ cleanup_project_workspaces() {
 
   if [[ -n "$task" ]]; then
     validate_workspace_path "$project_root" "$task" || return 1
-    # TARGETED CLEANUP: TRUST THE USER
+    [[ "$task" != main ]] || { log_err "The main workspace is protected"; return 1; }
     local ws_path="$workspaces_dir/$task"
+    if workspace_is_active "$project_name" "$ws_path"; then
+      log_err "Workspace is active or resumable: $task"
+      return 1
+    else
+      [[ $? -eq 1 ]] || return 1
+    fi
     log_info "Cleaning workspace: $task"
     if cleanup_workspace "$ws_path" "$sources_dir" "$delete_local" "$delete_remote"; then
       log_succ "Cleaned: $task"
     else
       log_warn "Failed to clean: $task (maybe uncommitted changes?)"
+      return 1
     fi
   else
     # BULK CLEANUP: SAFETY IS PARAMOUNT
