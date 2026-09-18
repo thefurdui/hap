@@ -114,6 +114,12 @@ preflight_ignored_state() {
   local repo="$1" stopped="$2" relative="$3"
   [[ "$relative" != *$'\n'* && "$relative" != *$'\r'* ]] || { log_err "State paths cannot contain line breaks"; return 1; }
   [[ ! -L "$repo/$relative" ]] || { log_err "Preserve ignored symlinks before init: $relative"; return 1; }
+  case "/$relative" in
+    */node_modules/*|*/vendor/*|*/dist/*|*/build/*)
+      log_err "Ignored files in excluded directories must be preserved or removed before init: $relative"
+      return 1
+      ;;
+  esac
   case "${relative##*/}" in
     *.db|*.sqlite|*.sqlite3|*-wal|*-shm|*-journal)
       [[ "$stopped" == true ]] || { log_err "Stop database users, then rerun init --state-stopped: $relative"; return 1; }
@@ -916,6 +922,7 @@ hap_init() (
     return
   fi
   project_name="${project_name:-${project_root##*/}}"
+  case "$project_root" in *'|'*|*$'\n'*|*$'\r'*) log_err "Project paths cannot contain pipes or line breaks"; return 1 ;; esac
   validate_name "$project_name" project || return 1
   require_git || return 1
   require_commands find awk mktemp || return 1

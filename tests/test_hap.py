@@ -639,6 +639,15 @@ class HapTests(unittest.TestCase):
         self.assertNotEqual(self.hap("add", "app", self.project, check=False).returncode, 0)
         self.assertEqual(list(db.iterdir()), [])
 
+    def test_init_does_not_strand_state_under_excluded_directories(self):
+        self.repo(self.project, {"file.txt": "x", ".gitignore": "vendor/\n"})
+        state = self.project / "vendor/certificate.pem"
+        state.parent.mkdir()
+        state.write_text("local state")
+        self.assertNotEqual(self.hap("init", "app", check=False).returncode, 0)
+        self.assertTrue((self.project / ".git").exists())
+        self.assertEqual(state.read_text(), "local state")
+
 
 if __name__ == "__main__":
     unittest.main()
