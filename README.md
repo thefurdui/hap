@@ -1,422 +1,192 @@
 # hap
 
-CLI tool for running AI agents in parallel on different git branches. Manages git worktrees, zellij sessions, and server lifecycle across multiple workspaces.
+A Bash CLI for parallel development with Git worktrees and Zellij or GUI editors. Each workspace gets separate checkouts, copied configuration, and its own data directory. Workspaces are organizational isolation, not a sandbox: their processes still run as your Unix user.
 
-## The Problem
+## Requirements and installation
 
-You're working on a feature. An agent is running on it. It takes 20 minutes. You're sitting there. That's 20 minutes gone.
+- Bash 4+ and Git 2.31+ for workspace operations. On macOS, put Homebrew Bash ahead of `/bin/bash` on PATH.
+- Zellij, Cursor, or Antigravity, depending on the selected editor. GUI integration uses the editor's `--wait` option.
+- `fzf` only for the interactive project picker.
+- `pnpm` or Go only when explicitly installing dependencies for repositories using them.
+- Standard Unix tools including `find`, `awk`, and `mktemp`.
 
-`hap` lets you spin up isolated workspaces — each with its own branch, its own agent, its own terminal session — so you can work on three things at once while agents do the heavy lifting.
+Install from a reviewed checkout:
 
-## The 4-Pillar Architecture
-
-Every `hap` project is organized into four pillars. Each pillar has one job, and the separation prevents entire categories of bugs (corrupted databases, missing configs, stale locks).
-
-```
-your-project/                       ← project root
-├── sources/                        ← PILLAR 1: bare truth
-│   ├── frontend/                   ← detached HEAD, worktree origin
-│   └── backend/
-├── workspaces/                     ← PILLAR 2: isolated work
-│   ├── main/
-│   │   ├── frontend/               ← git worktree
-│   │   └── backend/
-│   ├── alpha/
-│   └── PROJ-1234/
-├── shared/                         ← PILLAR 3: static config (symlinked)
-│   ├── frontend/
-│   │   └── .env
-│   └── backend/
-│       ├── .env
-│       └── certs/
-│           └── server.pem
-├── data/                           ← PILLAR 4: mutating state (never symlinked)
-│   └── backend/
-│       └── dev.db
-└── config/
-    ├── hap.kdl                 ← default layout
-    └── profiles/               ← optional named layouts (-p)
-        └── auth-beat.kdl
-```
-
-| Pillar        | Purpose                                                                                   | Symlinked? | Contents                                                         |
-| ------------- | ----------------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------- |
-| `sources/`    | Bare repos with detached HEAD. The single source of truth for git operations.             | —          | `.git`, all tracked files                                        |
-| `workspaces/` | Isolated working copies. Each one gets its own branch, its own agent, its own terminal.   | —          | Git worktrees                                                    |
-| `shared/`     | Static, read-only configuration. Automatically symlinked into every workspace.            | ✅ Yes     | `.env`, `.env.*`, `*.pem`, `*.crt`, `*.key`                      |
-| `data/`       | Mutating, lock-sensitive state. **Never symlinked.** Accessed via path routing in `.env`. | ❌ Never   | `*.db`, `*.sqlite`, `*.sqlite3`, `*.db-wal`, `*.db-shm`, `*.log` |
-
-### Why `shared/` exists
-
-Config files like `.env` aren't committed to git, but every workspace needs them. `hap` symlinks files from `shared/<repo>/` into each workspace, so you maintain one copy and every branch sees it.
-
-### Why `data/` exists (and why databases are never symlinked)
-
-SQLite uses file-level locking and WAL (Write-Ahead Logging). Symlinks break both mechanisms:
-
-- **WAL corruption:** SQLite creates `*.db-wal` and `*.db-shm` files next to the database. If the database is a symlink, the WAL files end up in the workspace directory, not next to the real database. This silently corrupts data.
-- **Lock contention:** Multiple workspaces symlinking to the same database would bypass SQLite's locking, causing concurrent write corruption.
-
-By keeping databases in `data/` and routing to them via `.env` paths, each workspace reads from the same data without symlink hazards.
-
-### Monorepo path preservation
-
-For monorepos, `hap` preserves the internal directory structure when extracting state files. A monorepo like this:
-
-```
-my-saas/
-├── apps/
-│   ├── web/
-│   │   └── .env          ← config
-│   └── api/
-│       ├── .env          ← config
-│       └── prisma/
-│           └── dev.db    ← database
-└── packages/
-    └── auth/
-        └── auth.pem      ← certificate
-```
-
-After `hap init`, the structure is mirrored:
-
-```
-my-saas/
-├── shared/my-saas/
-│   ├── apps/
-│   │   ├── web/.env
-│   │   └── api/.env
-│   └── packages/
-│       └── auth/auth.pem
-├── data/my-saas/
-│   └── apps/
-│       └── api/
-│           └── prisma/dev.db
-└── sources/my-saas/
-    └── (everything else)
-```
-
-### Configuring `.env` paths for `data/`
-
-After init, you need to update `.env` files in `shared/` to reference their databases in `data/` using relative paths. The path must resolve from the file's eventual location inside a workspace (since it's symlinked there).
-
-**Path math:** from `workspaces/<ws>/<repo>/apps/api/.env`, you need to escape up to the project root — that's 5 levels (`../../../../../`) — then descend into `data/<repo>/apps/api/dev.db`.
-
-```bash
-# In shared/my-saas/apps/api/.env:
-DB_PATH=../../../../../data/my-saas/apps/api/prisma/dev.db
-```
-
-The depth depends on how deeply nested the `.env` file is within the monorepo. `hap init` prints the exact calculation for each extracted file.
-
-## Two Ways to Use It
-
-### Pets (Permanent Workspaces)
-
-You create a few workspaces and keep them around. Name them by domain, by priority, whatever works for you.
-
-```
-workspaces/
-├── main/          ← your daily driver, servers running here
-├── alpha/         ← user-facing features
-├── beta/          ← backend / infra work
-└── gamma/         ← experiments, spikes
-```
-
-When you finish a feature in `alpha`, you merge the branch, check out a new one, and reuse the workspace. The workspace is yours — you maintain it like you maintain your desk.
-
-**Good for:** solo devs, small teams, startups. You know your workspaces, you know what's in each one.
-
-### Cattle (Ephemeral Workspaces)
-
-One workspace per ticket. `PROJ-1234` gets a workspace, a branch, an agent. When the PR is merged, you clean it up. No attachment.
-
-```
-workspaces/
-├── main/
-├── PROJ-1234/     ← created for the ticket, deleted after merge
-├── PROJ-1237/
-└── PROJ-1241/
-```
-
-`hap` handles the creation and cleanup. You don't think about the workspace — you think about the ticket.
-
-**Good for:** teams, corporations, anyone who works off a backlog. Workspaces are disposable.
-
-Both approaches use the exact same commands. The only difference is whether you run `hap clean` after merging.
-
-## Install
-
-**Requires:** `bash` 4.0+, `zellij`, `fzf`, `git`
-
-**Optional:** `lazygit`
-
-**One-line Install:**
-
-```bash
-curl -sL https://raw.githubusercontent.com/thefurdui/hap/refs/heads/main/install.sh | bash
-```
-
-**Manual Install:**
-
-```bash
+```sh
 git clone https://github.com/thefurdui/hap.git
 cd hap
+git checkout v1.2.0
 make install
 ```
 
-## Quick Start
+`make install` defaults to `~/.local/bin/hap` and `${XDG_DATA_HOME:-$HOME/.local/share}/hap/templates/`. Override `PREFIX`, `BINDIR`, or `DATADIR` as needed. Add the executable directory to PATH. `make uninstall` removes only the executable and distributed template; it keeps the project registry and project files.
 
-```bash
-cd ~/projects/your-project
-hap init
-```
+The release downloader is also available as `bash install.sh` from a reviewed checkout. It defaults to `v1.2.0`, requires HTTPS and successful HTTP responses, verifies `SHA256SUMS`, and stages both files before replacement. Set `HAP_INSTALL_REF` to a released version tag or a full commit SHA; use `HAP_BIN_DIR` and `HAP_DATA_DIR` to override installation destinations. The checksum manifest and installer share the repository's trust boundary; checksums are not an independent signature against a compromised publisher.
 
-That's it. `hap init` detects your repos, scaffolds the 4-pillar directory structure, extracts state files (`.env`, databases, certs) into `shared/` and `data/` preserving their internal paths, creates worktrees, copies the layout template, and registers the project.
+## Project structure
 
-Then edit `config/hap.kdl` to set your server start commands, update any `.env` paths (if the extraction report tells you to), and:
-
-```bash
-hap open your-project -u
-```
-
-## Setup
-
-### `hap init`
-
-Run `hap init` inside your project directory. It handles two scenarios:
-
-**Single repo** (`.git` at root):
-
-```bash
-cd ~/projects/myapp    # has .git here
-hap init
-```
-
-**Multiple repos** (subdirectories with `.git`):
-
-```bash
-cd ~/projects/myapp    # has frontend/, backend/ with .git inside each
-hap init
-```
-
-You can pass a custom project name: `hap init my-custom-name`. Defaults to the directory name.
-
-**What it does:**
-
-1. Scans for git repos (level 0: root `.git`, level 1: subdirs with `.git`)
-2. Creates the 4-pillar scaffold: `sources/`, `workspaces/main/`, `shared/`, `data/`, `config/`
-3. **Extracts shared state** (`.env`, `.env.*`, `*.pem`, `*.crt`, `*.key`) from each repo into `shared/<repo>/`, preserving internal directory structure
-4. **Extracts mutating state** (`*.db`, `*.sqlite`, `*.sqlite3`, `*.db-wal`, `*.db-shm`, `*.log`) into `data/<repo>/`, preserving internal directory structure
-5. Moves each repo into `sources/<name>/`
-6. Detaches HEAD in each source repo, creates a worktree in `workspaces/main/<name>/` on the original branch
-7. Moves any leftover files/dirs into `misc/`
-8. Copies `hap.kdl` template into `config/`
-9. Registers the project in `~/.local/share/hap/projects.csv`
-10. **Prints a state extraction report** showing exactly what was moved and where
-
-Excluded from scanning: `node_modules/`, `vendor/`, `.git/`, `dist/`, `build/`.
-
-**Result (monorepo example):**
-
-```
-your-project/
-├── config/
-│   └── hap.kdl             ← edit this: cwd paths, server commands
-├── sources/
-│   └── my-saas/            ← detached HEAD, worktree origin
-│       └── apps/
-│           ├── web/        ← .env extracted to shared/
-│           └── api/        ← .env + db extracted
+```text
+project/
+├── sources/                      # ordinary Git checkouts, detached after init
+│   └── app/
 ├── workspaces/
-│   └── main/
-│       └── my-saas/        ← git worktree (your working copy)
-│           └── apps/
-│               └── api/
-│                   └── .env  ← symlink → shared/my-saas/apps/api/.env
-├── shared/
-│   └── my-saas/
-│       └── apps/
-│           ├── web/.env
-│           └── api/.env
+│   ├── main/app/                 # linked Git worktree on the original branch
+│   └── task/app/                 # linked worktree on hap/task
+├── shared/app/                   # ignored configuration seeds
 ├── data/
-│   └── my-saas/
-│       └── apps/
-│           └── api/
-│               └── prisma/dev.db
-└── misc/                    ← leftover non-repo files (if any)
+│   ├── workspaces/main/app/      # original stopped database and companions
+│   ├── workspaces/task/app/      # separate data for this workspace
+│   └── shared/app/               # only used with --shared-data
+└── config/
+    ├── hap.kdl
+    └── profiles/                 # optional named layouts
 ```
 
-### Shared State
+The source repositories are **not bare repositories**. Every linked worktree shares its source's Git object store and refs. Local branches remain after cleanup, and detached tips receive recovery refs.
 
-Files in `shared/` are automatically symlinked into every workspace. `hap init` populates `shared/` for you, but you can also manage it manually:
+`shared/` holds configuration seeds. New workspaces receive ordinary copies with mode `0600`, so editing one workspace's `.env` does not change another workspace. `--shared-config` explicitly opts into writable shared symlinks. Existing generated state is kept on subsequent opens; opening does not refresh or overwrite local edits. The `.hap-state/` metadata records generated paths and their initial hashes or link targets so cleanup can recognize unchanged files. Generated files are added to Git's local exclusion rules.
 
-1. Create a folder in `shared/` named after the repo: `shared/backend/`
-2. Mirror the file's relative path: `shared/backend/.env`
-3. `hap` will symlink these into every new workspace automatically
+Databases live outside worktrees. `HAP_DATA_DIR` is exported into sessions and points to `data/workspaces/<workspace>/`, or `data/shared/` with `--shared-data`. Applications must actually use this path. For example, customize a server command to set:
 
-### Data State
-
-Files in `data/` are **never symlinked**. Applications access them via paths configured in `.env` files. `hap init` populates `data/` for you during initialization.
-
-To add new databases later, place them directly in `data/<repo>/` and update your `.env` accordingly.
-
-### Manual Registration
-
-If you already have the directory structure set up (or want to register a project without scaffolding):
-
-```bash
-hap add your-project /path/to/project
+```sh
+DB_PATH="$HAP_DATA_DIR/app/dev.db" ./start-server
 ```
 
-## Usage
+Hap does not rewrite arbitrary `.env` contents, expand variables inside dotenv files, assign server ports, or clone live databases. New workspaces start with empty data directories. Use your database's supported backup/restore mechanism if they need seed data. Cleanup never deletes their data directories.
 
-```
-hap <command> [args] [flags]
+## Initialize a project
 
-Commands:
-  init [name]                    Scaffold project from current directory
-  open <project> [workspace]     Open project or workspace
-  add <name> [path]              Register a project
-  remove <name>                  Unregister a project
-  clean <project> [workspace]    Cleanup workspace(s)
-  list                           List registered projects
-  help                           Show this help
-  version                        Show version
+Run inside a normal Git checkout or a directory containing normal checkouts:
 
-Flags for 'open':
-  -u              Auto-start servers (like docker compose up)
-  -p, --profile   Layout profile from config/profiles/<name>.kdl
-                  (omit name to list: hap open myproject -p)
-  -e <editor>     Editor: zellij (default), cursor, antigravity
-  -b <branch>     Base branch for new workspace (default: dev)
-  -B <branch>     Target branch name (default: hap/<workspace>)
-
-Flags for 'clean':
-  -D              Also delete remote branches
-  -y              Skip confirmation (with -D)
+```sh
+hap init                     # project name defaults to the directory name
+hap init my-project          # choose a registry name
+hap init my-project --state-stopped
 ```
 
-Run `hap` with no arguments for interactive project selection (fzf).
+Before initialization:
 
-### Open your project (main driver)
+1. Stop processes using the repositories and databases.
+2. Commit or otherwise preserve tracked changes and ordinary untracked files. Back up or remove unknown ignored files, including rebuildable dependency caches, before retrying.
+3. Check out an existing branch. Repositories without commits, detached checkouts, linked-worktree inputs, and repositories with existing external worktrees are rejected before migration.
+4. If ignored database files exist, pass `--state-stopped` after stopping their users. This is your assertion that migration is safe; hap does not stop services for you.
 
-```bash
-hap                               # interactive picker
-hap open myproject                 # direct, servers tab ready but idle
-hap open myproject -u              # servers auto-start on session create
-hap open myproject -p auth-beat    # use config/profiles/auth-beat.kdl
+Init validates the inputs, records a recovery journal, moves each repository into `sources/`, extracts recognized **ignored and untracked** state, and creates `workspaces/main/` on the original branches. Main receives the same configuration setup as later workspaces. Tracked `.env.example` files, certificates, logs, and database fixtures remain tracked application files. Application directories named `config`, `data`, or `shared` inside a root repository move with that repository.
+
+Recognized config patterns are `.env`, `.env.*`, `*.pem`, `*.crt`, and `*.key`. Data patterns include `*.db`, `*.sqlite`, `*.sqlite3`, their `-wal`, `-shm`, and `-journal` companions, and `*.log`. Scanning excludes `.git`, `node_modules`, `vendor`, `dist`, and `build`. Unknown ignored files or state symlinks must be handled explicitly first. Non-repository files in a multi-repository project are left where they are.
+
+On an ordinary failure, hap attempts to reverse recorded moves and restore the original branch attachment. A crash or recovery conflict leaves `.hap-init-journal/` for inspection. After preserving any files changed since the failure, resume recovery with:
+
+```sh
+hap init --recover
 ```
 
-### Open a workspace
+Recovery refuses conflicts rather than overwriting newer work. Do not discard the journal while it contains unresolved operations.
 
-```bash
-hap open myproject bugfix          # opens "bugfix", creates it if new
-hap open myproject bugfix -u       # same, but auto-start servers
-hap open myproject bugfix -B feat/login   # custom branch name
-hap open myproject bugfix -p landing -u   # profile + workspace
+Then edit `config/hap.kdl` and configure database paths using the actual destinations printed by init. Relative path resolution depends on the application consuming the value, not on where an env file happens to live.
+
+SQLite does not generally lose locking simply because a path is a symlink: its Unix interface has attempted canonical symlink resolution since 3.10.0. Moving an open database or separating it from a hot journal is a different, real risk. See [SQLite's corruption guidance](https://www.sqlite.org/howtocorrupt.html). Hap avoids symlinked database provisioning and requires stopped state during migration.
+
+## Open a workspace
+
+```sh
+hap                              # interactive project picker
+hap open my-project              # initial main workspace
+hap open my-project task         # create or validate/resume task
+hap open my-project task -b main
+hap open my-project task -B feat/login
+hap open my-project task --reuse-branch
+hap open my-project task --install --publish
+hap open my-project task -u
+hap open my-project task -e cursor
 ```
 
-What happens when a workspace is created:
+| Option | Behavior |
+| --- | --- |
+| `-u` | Set `HAP_UP=1` for a new session's server commands. |
+| `-e <editor>` | Select `zellij` (default), `cursor`, or `antigravity`. |
+| `-b <ref>` | Select the base for new branches. |
+| `-B <branch>` | Select the target branch name; default is `hap/<workspace>`. |
+| `--reuse-branch` | Deliberately reuse an existing target branch. |
+| `--fetch` | Fetch origin before resolving bases. |
+| `--install` | Run the repository's pnpm install or Go module download and wait for success. |
+| `--publish` | Push each selected workspace branch to origin. |
+| `--shared-config` | Use writable shared config links when provisioning new config paths. |
+| `--shared-data` | Export the shared data directory instead of workspace-specific data. |
+| `-p`, `--profile <name>` | Select `config/profiles/<name>.kdl`. Without a name, list profiles. |
 
-1. Creates `workspaces/bugfix/`
-2. Adds git worktrees from every repo in `sources/` (branch: `hap/bugfix`)
-3. Pushes the branch to origin
-4. Installs dependencies in the background (pnpm/go)
-5. Symlinks shared state from `shared/` (preserving nested directory structure)
-6. Opens a zellij session
+Ordinary `open` does not install dependencies, fetch, or push. Installation can execute repository-controlled code with your permissions, so `--install` is for trusted repositories. Layout files also contain executable commands; use trusted layouts. `-u` only controls server commands that honor `HAP_UP`.
 
-If the workspace already exists, it just opens it.
+Without `-b`, the base is resolved from the source repository's `hap.baseBranch` Git setting, then cached `origin/HEAD`, then the source's attached branch or detached HEAD. This is a local snapshot unless you request `--fetch`. Set a per-repository policy with:
 
-### Servers and the `-u` flag
-
-Every session gets a "servers" tab with panes for each service. The `-u` flag controls what happens **when the session is first created**:
-
-|              | Without `-u`                                | With `-u`                                         |
-| ------------ | ------------------------------------------- | ------------------------------------------------- |
-| Server panes | Open to a ready shell                       | Auto-run your start command                       |
-| Use case     | Workspaces where you just need code + agent | Main driver where you want servers up immediately |
-
-**After the session is created, `-u` doesn't matter anymore.** You're inside a living zellij session. You manage servers manually from there:
-
-- **Stop a server:** go to the servers tab, Ctrl+C
-- **Start a server:** go to the servers tab, type the command (or up-arrow for history)
-- **Switch context:** you have multiple zellij sessions open in different terminals. Just switch terminals.
-
-The whole point: every session already has server panes with the right `cwd` set. You never need to close zellij, reopen it, or re-run `hap` just to toggle servers. The panes are there, the shells are there, you just Ctrl+C / type the command.
-
-### Cleanup
-
-```bash
-hap clean myproject bugfix         # remove workspace + local branch
-hap clean myproject bugfix -D      # also delete remote branch (asks confirmation)
-hap clean myproject bugfix -D -y   # skip confirmation
-hap clean myproject                # bulk cleanup: removes all inactive workspaces
+```sh
+git -C sources/app config hap.baseBranch main
 ```
 
-Bulk cleanup skips workspaces that have an active zellij session or a `.hap.gui` lock file (from GUI editors).
+Initialization failures and dependency failures leave a workspace unready. A later open validates each repository and fills in missing worktrees; it does not assume an existing directory is complete. Existing unrelated directories or conflicting files are preserved and reported.
 
-### Project management
+Project mutations are serialized with `.hap-lock/`. If a process was killed, inspect the lock's owner and the interrupted operation before manually removing a stale lock. Registry updates use a separate lock and atomic file replacement.
 
-```bash
-hap add myproject /path/to/root    # register manually (hap init does this for you)
-hap remove myproject               # unregister (doesn't delete files)
-hap list                           # show all registered projects
+## Sessions and layouts
+
+Existing Zellij sessions are attached or resurrected without deleting saved session state. Profiles and `-u` affect a newly created session; they do not replace an existing session's layout or restart its servers. Stop and start servers from their panes.
+
+The distributed template uses Bash shells and no hardcoded repository names, editors, agents, or optional Git UI. Customize pane `cwd` and `command` properties for your project. Named profiles live in `config/profiles/`; profile names cannot escape that directory.
+
+GUI commands use `--wait`. Their workspace remains protected while the CLI waits, and the GUI marker is removed when the editor returns or fails to launch. A killed process or older fire-and-forget version can leave a marker. After closing the editor, explicitly clear stale markers with:
+
+```sh
+hap unlock my-project task
 ```
 
-### Editors
+Unlock refuses a marker whose recorded owner is still running. It does not close editors or terminate Zellij sessions. Session detection failures preserve workspaces rather than treating them as inactive.
 
-```bash
-hap open myproject -e cursor
-hap open myproject bugfix -e antigravity
+## Cleanup and history preservation
+
+```sh
+hap clean my-project task
+hap clean my-project             # consider all inactive non-main workspaces
+hap clean my-project task -D     # also delete matching remote branches; prompts
+hap clean my-project task -D -y  # same operation without the prompt
 ```
 
-GUI editors (`cursor`, `antigravity`) use fire-and-forget mode: `hap` creates a `.hap.gui` lock file and exits. The lock protects the workspace from bulk cleanup. Targeted cleanup (`hap clean project workspace`) removes the lock.
+Cleanup preserves local branches, workspace data, dirty worktrees, unknown files, ignored local files, edited generated config, Git worktree locks, and active/resumable sessions. Unchanged generated config may be removed with its workspace. There is no recursive-delete fallback when Git refuses removal.
 
-## Layout
+`main` is protected even for targeted cleanup. Standard long-lived branches (`main`, `master`, `dev`, `develop`, `trunk`, `stable`, `release`, and `release/*`), the remote default, and configured base branches are protected. Add exact additional branch names with:
 
-Default layout file: `config/hap.kdl`. It usually has two tabs:
-
-1. **code** — your editors + agent pane
-2. **servers** — server processes, lazygit, and spare shells
-
-Edit `config/hap.kdl` to match your project. The template uses `frontend/` and `backend/` as example `cwd` paths — change them to your actual repo names from `sources/`.
-
-The server panes check the `HAP_UP` env var to decide whether to auto-run. Replace the placeholder `echo` commands with your real start commands. See [templates/hap.kdl](templates/hap.kdl) for the pattern.
-
-### Layout profiles
-
-When one project needs different pane setups (auth+beat vs landing-only, etc.), put named layouts in `config/profiles/` and select them with `-p` / `--profile`:
-
-```
-config/
-├── hap.kdl                 ← default (used when no -p)
-└── profiles/
-    ├── auth-beat.kdl
-    ├── auth-gain.kdl
-    ├── beat-gain.kdl
-    └── landing.kdl
+```sh
+git -C sources/app config --add hap.protectedBranch production
 ```
 
-```bash
-hap open myproject -p auth-beat
-hap open myproject -p landing -u
+Remote deletion never grants permission to discard local changes. Hap first verifies that the remote tip matches retained local history, then uses a lease so a newer remote update cannot be deleted accidentally. A detached worktree's commit is retained under `refs/hap/recovery/` before removal. Inspect those refs using `git for-each-ref refs/hap/recovery`.
+
+Cleanup can report partial progress if a later Git operation fails. Its exit status is nonzero on a failed inspection or removal. Inspect the output before retrying; preserved branches and data remain available.
+
+## Registry and names
+
+```sh
+hap add my-project /absolute/or/relative/path
+hap remove my-project            # unregister only
+hap list
+hap help
+hap version
 ```
 
-Resolution:
+The registry is `${XDG_DATA_HOME:-$HOME/.local/share}/hap/projects.csv`, with literal `name|absolute-path` records. Project, repository, workspace, and profile names start with an ASCII letter or digit and contain only letters, digits, dots, underscores, and hyphens. Filesystem paths can contain spaces, but registry paths cannot contain pipes or line breaks. Provisioned state paths cannot contain line breaks; tracked application filenames remain Git's responsibility.
 
-1. `-p <name>` → `config/profiles/<name>.kdl` (errors if missing)
-2. else → `config/hap.kdl` if present
-3. else → open zellij with no custom layout
+## Upgrading from v1.1
 
-Profiles only change which layout file zellij loads. They do not change which repos get worktrees — every workspace still gets all `sources/`.
+- Read the [v1.2.0 release notes](CHANGELOG.md) before relying on the old cleanup or automatic setup behavior.
+- Add `--install` and `--publish` where you deliberately want those actions. Use `--reuse-branch` when recreating a removed workspace whose local branch remains.
+- Exact old generated config symlinks are converted to local copies on setup by default. New copies preserve the current seed contents; existing local edits are not overwritten.
+- Existing databases are not relocated merely by upgrading or opening a project. Stop database users, back up state, and explicitly migrate/configure application paths for `data/workspaces/<workspace>/<repo>/`. Old hardcoded `.env` paths continue to mean what the application makes them mean.
+- Old `.hap.gui` markers can be cleared using `hap unlock` after closing their editors.
+- The new template is installed into the template store. Existing `config/hap.kdl` files are not replaced during an upgrade.
 
-## Data
+## Development
 
-All hap data lives in `~/.local/share/hap/`:
+`make check` runs Bash syntax checks, ShellCheck, and Python unittest integration tests. Tests use temporary projects, local bare remotes, and stubbed editors/installers; they do not operate on your real workspaces or publish to external remotes. CI runs the same checks on Linux and macOS.
 
-- `projects.csv` — registered projects (name|path)
-- `templates/hap.kdl` — layout template (installed by `make install`)
+The [implementation record](docs/v1.2.0-work.md) maps all 32 review findings to the changes. Python and ShellCheck are development dependencies, not runtime dependencies of hap.
 
-## License
-
-MIT
+MIT license.

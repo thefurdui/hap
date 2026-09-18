@@ -1305,32 +1305,40 @@ hap_interactive() {
 # --- CLI ---
 
 usage() {
-  cat <<EOF
+  cat <<'EOF'
 Usage: hap <command> [args] [flags]
 
 Commands:
-  init [name]                    Scaffold project from current directory
-  open <project> [workspace]     Open project or workspace
+  init [name] [--state-stopped]  Initialize clean, ordinary Git repositories
+  init --recover                Recover an interrupted initialization
+  open <project> [workspace]     Create, validate, or open a workspace
   add <name> [path]              Register a project
-  remove <name>                  Unregister a project
-  clean <project> [workspace]    Cleanup workspace(s)
-  list                           List registered projects
-  help                           Show this help
-  version                        Show version
+  remove <name>                  Unregister without deleting files
+  clean <project> [workspace]    Safely remove inactive worktrees; retain history/data
+  unlock <project> <workspace>   Clear stale GUI/opening markers after closing editors
+  list                          List registered projects
+  help                          Show this help
+  version                       Show version
 
-Flags for 'open':
-  -u              Auto-start servers (like docker compose up)
-  -p, --profile   Layout profile from config/profiles/<name>.kdl
-                  Omit the name (hap open <project> -p) to list profiles
-  -e <editor>     Editor: zellij (default), cursor, antigravity
-  -b <branch>     Base branch for new workspace (default: dev)
-  -B <branch>     Target branch name (default: hap/<workspace>)
+Open options:
+  -u                    Auto-start configured servers in a new session
+  -e <editor>           zellij (default), cursor, or antigravity
+  -b <ref>              Base for new branches (default: repository policy/local HEAD)
+  -B <branch>           Target branch (default: hap/<workspace>)
+  --reuse-branch        Deliberately reuse an existing target branch
+  --fetch               Fetch origin before resolving base commits
+  --install             Install dependencies; may execute repository code
+  --publish             Push workspace branches to origin
+  --shared-config       Provision writable shared config links instead of copies
+  --shared-data         Select shared data instead of workspace-specific data
+  -p, --profile [name]  Select a layout profile, or list available profiles
 
-Flags for 'clean':
-  -D              Also delete remote branches
-  -y              Skip confirmation (with -D)
+Clean options:
+  -D                    Also delete verified matching remote branches
+  -y                    Skip the remote-deletion confirmation
 
-Run 'hap' with no arguments for interactive project selection.
+Run without arguments for the fzf project picker. Main, active workspaces,
+local changes, unknown files, and protected branches are preserved.
 EOF
 }
 
