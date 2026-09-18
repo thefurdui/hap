@@ -291,6 +291,29 @@ class HapTests(unittest.TestCase):
         self.assertIn("Config: .env.local ->", result.stdout)
         self.assertIn("Data: dev.db ->", result.stdout)
 
+    def test_workspace_retry_repairs_partial_creation(self):
+        self.repo(self.project / "sources/a")
+        other = self.repo(self.project / "sources/b")
+        self.git(other, "branch", "-m", "main")
+        self.git(other, "update-ref", "-d", "refs/remotes/origin/dev")
+        self.register()
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        work = self.project / "workspaces/task"
+        self.assertFalse((work / ".hap-ready").exists())
+        self.git(other, "branch", "dev", "main")
+        self.hap("open", "project", "task")
+        self.assertTrue((work / "a/.git").exists())
+        self.assertTrue((work / "b/.git").exists())
+        self.assertTrue((work / ".hap-ready").exists())
+        self.assertFalse((self.project / ".hap-lock").exists())
+
+    def test_project_lock_blocks_parallel_mutation(self):
+        self.repo()
+        self.register()
+        (self.project / ".hap-lock").mkdir()
+        self.assertNotEqual(self.hap("open", "project", "task", check=False).returncode, 0)
+        self.assertFalse((self.project / "workspaces/task").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
