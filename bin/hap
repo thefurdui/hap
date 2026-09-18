@@ -159,52 +159,18 @@ extract_data_state() {
 # Print a highly visible summary block of what was moved during init.
 # Args: <repo_name> <shared_files_string> <data_files_string> <project_root>
 print_state_extraction_summary() {
-  local repo_name="$1"
-  local shared_files="$2"
-  local data_files="$3"
-  local project_root="$4"
-
-  if [[ -z "$shared_files" && -z "$data_files" ]]; then
-    return
-  fi
-
-  echo ""
-  echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}${BOLD}║  STATE EXTRACTION REPORT: ${repo_name}${NC}"
-  echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
-
-  if [[ -n "$shared_files" ]]; then
-    echo ""
-    echo -e "  ${GREEN}${BOLD}shared/${repo_name}/${NC} ${DIM}(config — symlinked into workspaces)${NC}"
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      echo -e "    ${DIM}→${NC} $f"
-    done <<<"$shared_files"
-  fi
-
+  local repo_name="$1" shared_files="$2" data_files="$3" root="$4" file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    printf 'Config: %s -> %s/shared/%s/%s\n' "$file" "$root" "$repo_name" "$file"
+  done <<< "$shared_files"
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    printf 'Data: %s -> %s/data/%s/%s\n' "$file" "$root" "$repo_name" "$file"
+  done <<< "$data_files"
   if [[ -n "$data_files" ]]; then
-    echo ""
-    echo -e "  ${YELLOW}${BOLD}data/${repo_name}/${NC} ${DIM}(databases/logs — never symlinked)${NC}"
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      echo -e "    ${DIM}→${NC} $f"
-    done <<<"$data_files"
+    log_info "Configure database paths explicitly; relative paths depend on your application, not the env file location."
   fi
-
-  if [[ -n "$shared_files" && -n "$data_files" ]]; then
-    echo ""
-    echo -e "  ${YELLOW}${BOLD}⚠  ACTION REQUIRED:${NC}"
-    echo -e "  ${YELLOW}Update .env files in shared/ to point to data/ using relative paths.${NC}"
-    echo -e "  ${DIM}From a workspace, the path escapes up through workspaces/<ws>/<repo>/...${NC}"
-    echo ""
-    echo -e "  ${DIM}Example:${NC}"
-    echo -e "  ${DIM}  If .env is at:  shared/${repo_name}/apps/api/.env${NC}"
-    echo -e "  ${DIM}  And DB is at:   data/${repo_name}/apps/api/dev.db${NC}"
-    echo -e "  ${DIM}  Then in .env:   DB_PATH=../../../../../data/${repo_name}/apps/api/dev.db${NC}"
-    echo -e "  ${DIM}  (resolve from workspace: workspaces/<ws>/${repo_name}/apps/api/ → ../../../../.. → project root)${NC}"
-  fi
-
-  echo -e "${CYAN}${BOLD}────────────────────────────────────────────────────────────────${NC}"
 }
 
 # Return 0 for active/resumable, 1 for absent, 2 for unknown. Unknown is unsafe.
@@ -732,7 +698,7 @@ hap_init() (
     log_err "An unfinished initialization exists. Inspect it, then run hap init --recover"; return 1;
   }
   local root_repo=false
-  local -a repos=() branches=() reports=()
+  local -a repos=() branches=() shared_reports=() data_reports=()
   if [[ -d "$project_root/.git" ]]; then
     root_repo=true
     repos+=("$project_name")
@@ -819,7 +785,8 @@ hap_init() (
     repo="$project_root/sources/$name"
     shared_files=$(extract_shared_state "$repo" "$project_root/shared/$name")
     data_files=$(extract_data_state "$repo" "$project_root/data/$name")
-    reports+=("$name"$'\x1f'"$shared_files"$'\x1f'"$data_files")
+    shared_reports+=("$shared_files")
+    data_reports+=("$data_files")
     init_record H "$repo" "refs/heads/$branch"
     git -C "$repo" checkout --detach
     init_record W "$repo" "$project_root/workspaces/main/$name"
@@ -834,11 +801,10 @@ hap_init() (
   rm "$INIT_JOURNAL/operations"
   rmdir "$INIT_JOURNAL"
   trap - EXIT INT TERM
-  for item in "${reports[@]}"; do
-    local r_name r_shared r_data
-    IFS=$'\x1f' read -r r_name r_shared r_data <<<"$item"
-    print_state_extraction_summary "$r_name" "$r_shared" "$r_data" "$project_root"
+  for ((i=0; i<${#repos[@]}; i++)); do
+    print_state_extraction_summary "${repos[i]}" "${shared_reports[i]}" "${data_reports[i]}" "$project_root"
   done
+
   log_succ "Project initialized: $project_name"
   log_info "Edit config/hap.kdl, then run hap open $project_name"
 )

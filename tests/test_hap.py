@@ -282,6 +282,15 @@ class HapTests(unittest.TestCase):
         self.hap("init", "app")
         self.assertEqual((self.project / "workspaces/main/app/.env").read_text(), "local configuration")
 
+    def test_init_reports_every_extracted_file(self):
+        self.repo(self.project, {"file.txt": "x", ".gitignore": ".env*\n*.db\n"})
+        for name in (".env", ".env.local", "dev.db"):
+            (self.project / name).write_text("state")
+        result = self.hap("init", "app", "--state-stopped")
+        self.assertIn("Config: .env ->", result.stdout)
+        self.assertIn("Config: .env.local ->", result.stdout)
+        self.assertIn("Data: dev.db ->", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
