@@ -145,6 +145,14 @@ class HapTests(unittest.TestCase):
         refs = self.git(source, "for-each-ref", "--format=%(objectname)", "refs/hap/recovery").stdout
         self.assertIn(tip, refs)
 
+    def test_remote_delete_preserves_uncommitted_work(self):
+        source, work = self.workspace()
+        self.git(work, "push", "-qu", "origin", "hap/task")
+        (work / "file.txt").write_text("uncommitted")
+        self.hap("clean", "project", "task", "-D", "-y", check=False)
+        self.assertEqual((work / "file.txt").read_text(), "uncommitted")
+        self.assertIn("hap/task", self.git(source, "ls-remote", "--heads", "origin").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
